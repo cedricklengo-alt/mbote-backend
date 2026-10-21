@@ -1,0 +1,124 @@
+/**
+ * Driver PostgreSQL — utilisé en production (DATABASE_URL défini).
+ * Données PERSISTANTES : survivent aux redéploiements. (Neon, Render PG, Supabase…)
+ */
+const { Pool, types } = require('pg');
+
+// PG renvoie les BIGINT/NUMERIC en chaînes → on les convertit en nombres JS
+types.setTypeParser(20, (v) => parseInt(v, 10));    // BIGINT (int8)
+types.setTypeParser(1700, (v) => parseFloat(v));    // NUMERIC
+
+const SCHEMA = `
+CREATE TABLE IF NOT EXISTS users (
+  id         TEXT PRIMARY KEY,
+  phone      TEXT UNIQUE NOT NULL,
+  name       TEXT DEFAULT '',
+  country    TEXT DEFAULT 'CD',
+  role       TEXT DEFAULT 'user',
+  status     TEXT DEFAULT 'active',
+  password_hash TEXT,
+  created_at BIGINT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS wallets (
+  user_id       TEXT PRIMARY KEY REFERENCES users(id),
+  balance_cents BIGINT NOT NULL DEFAULT 0,
+  currency      TEXT NOT NULL DEFAULT 'USD'
+);
+CREATE TABLE IF NOT EXISTS transactions (
+  id           TEXT PRIMARY KEY,
+  user_id      TEXT NOT NULL REFERENCES users(id),
+  type         TEXT NOT NULL,
+  amount_cents BIGINT NOT NULL,
+  method       TEXT,
+  reference    TEXT,
+  status       TEXT NOT NULL DEFAULT 'completed',
+  created_at   BIGINT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS rates (
+  id                  SERIAL PRIMARY KEY,
+  prefix              TEXT NOT NULL,
+  destination         TEXT NOT NULL,
+  flag                TEXT DEFAULT '',
+  price_per_min_cents INTEGER NOT NULL,
+  active              INTEGER NOT NULL DEFAULT 1
+);
+CREATE TABLE IF NOT EXISTS calls (
+  id                  TEXT PRIMARY KEY,
+  user_id             TEXT NOT NULL REFERENCES users(id),
+  callee              TEXT NOT NULL,
+  destination         TEXT,
+  price_per_min_cents INTEGER NOT NULL,
+  max_sec             INTEGER NOT NULL,
+  status              TEXT NOT NULL,
+  started_at          BIGINT NOT NULL,
+  answered_at         BIGINT,
+  ended_at            BIGINT,
+  billed_sec          INTEGER DEFAULT 0,
+  cost_cents          INTEGER DEFAULT 0,
+  hangup_cause        TEXT
+);
+CREATE TABLE IF NOT EXISTS contacts (
+  id        TEXT PRIMARY KEY,
+  user_id   TEXT NOT NULL REFERENCES users(id),
+  name      TEXT NOT NULL,
+  phone     TEXT NOT NULL,
+  favorite  INTEGER DEFAULT 1
+);
+CREATE TABLE IF NOT EXISTS otps (
+  phone      TEXT PRIMARY KEY,
+  code       TEXT NOT NULL,
+  expires_at BIGINT NOT NULL
+);
+`;
+
+// Convertit les placeholders « ? » (style SQLite) en « $1, $2… » (style PG)
+const toPg = (sql) => {
+  let i = 0;
+  return sql.replace(/\?/g, () => '$' + ++i);
+};
+
+let pool;
+
+const ops = (client) => ({
+  get: async (sql, p = []) => (await client.query(toPg(sql), p)).rows[0],
+  all: async (sql, p = []) => (await client.query(toPg(sql), p)).rows,
+  run: async (sql, p = []) => { await client.query(toPg(sql), p); },
+});
+
+module.exports = {
+  name: 'postgres',
+  fn: {
+    greatest: 'GREATEST',
+    dateFromMs: (col) => `to_char(to_timestamp(${col}/1000.0),'YYYY-MM-DD')`,
+  },
+
+  async init() {
+    const url = process.env.DATABASE_URL;
+    const local = /localhost|127\.0\.0\.1/.test(url);
+    pool = new Pool({
+      connectionString: url,
+      ssl: local ? false : { rejectUnauthorized: false }, // Neon/Render exigent SSL
+      max: 10,
+    });
+    await pool.query(SCHEMA);
+  },
+
+  get: (sql, p) => ops(pool).get(sql, p),
+  all: (sql, p) => ops(pool).all(sql, p),
+  run: (sql, p) => ops(pool).run(sql, p),
+
+  async tx(fn) {
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      const r = await fn(ops(client));
+      await client.query('COMMIT');
+      return r;
+    } catch (e) {
+      await client.query('ROLLBACK').catch(() => {});
+      throw e;
+    } finally {
+      client.release();
+    }
+  },
+};

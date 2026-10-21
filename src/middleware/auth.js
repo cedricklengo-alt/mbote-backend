@@ -8,19 +8,22 @@ function sign(user) {
 }
 
 function requireAuth(req, res, next) {
-  const h = req.headers.authorization || '';
-  const token = h.startsWith('Bearer ') ? h.slice(7) : null;
-  if (!token) return res.status(401).json({ error: 'Token manquant' });
-  try {
-    const payload = jwt.verify(token, SECRET);
-    const user = db.prepare('SELECT * FROM users WHERE id = ?').get(payload.uid);
+  (async () => {
+    const h = req.headers.authorization || '';
+    const token = h.startsWith('Bearer ') ? h.slice(7) : null;
+    if (!token) return res.status(401).json({ error: 'Token manquant' });
+    let payload;
+    try {
+      payload = jwt.verify(token, SECRET);
+    } catch {
+      return res.status(401).json({ error: 'Token invalide ou expiré' });
+    }
+    const user = await db.get('SELECT * FROM users WHERE id = ?', [payload.uid]);
     if (!user) return res.status(401).json({ error: 'Utilisateur inconnu' });
     if (user.status === 'blocked') return res.status(403).json({ error: 'Compte bloqué' });
     req.user = user;
     next();
-  } catch {
-    return res.status(401).json({ error: 'Token invalide ou expiré' });
-  }
+  })().catch(next);
 }
 
 function requireAdmin(req, res, next) {

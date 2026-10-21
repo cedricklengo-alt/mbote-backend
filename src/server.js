@@ -7,6 +7,7 @@
 require('dotenv').config();
 const express = require('express');
 const path = require('path');
+const db = require('./db');
 
 const app = express();
 app.use(express.json());
@@ -40,7 +41,8 @@ app.get('/', (req, res) => res.redirect('/admin'));
 
 /* ---- Santé ---- */
 app.get('/api/health', (req, res) => res.json({
-  ok: true, service: 'mbote-backend', demo_mode: String(process.env.DEMO_MODE || 'true') === 'true',
+  ok: true, service: 'mbote-backend', db: db.name,
+  demo_mode: String(process.env.DEMO_MODE || 'true') === 'true',
 }));
 
 /* ---- Gestion d'erreurs ---- */
@@ -50,8 +52,14 @@ app.use((err, req, res, next) => {
 });
 
 const PORT = process.env.PORT || 4000;
-app.listen(PORT, '0.0.0.0', () => {
-  console.log(`✅ MBOTE! backend démarré sur le port ${PORT}`);
-  console.log(`   Console admin : http://localhost:${PORT}/admin`);
-  console.log(`   Mode démo     : ${String(process.env.DEMO_MODE || 'true')}`);
+db.init().then(() => {
+  app.listen(PORT, '0.0.0.0', () => {
+    console.log(`✅ MBOTE! backend démarré sur le port ${PORT}`);
+    console.log(`   Base de données : ${db.name}`);
+    console.log(`   Console admin   : http://localhost:${PORT}/admin`);
+    console.log(`   Mode démo       : ${String(process.env.DEMO_MODE || 'true')}`);
+  });
+}).catch((e) => {
+  console.error('💥 Impossible d\'initialiser la base de données :', e);
+  process.exit(1);
 });

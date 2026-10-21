@@ -1,102 +1,121 @@
 /**
  * Module ADMIN — back-office : stats, utilisateurs, tarifs, CDR, transactions.
- * Connexion par téléphone + mot de passe (rôle admin uniquement).
  */
 const express = require('express');
 const db = require('../db');
-const { uid, now, verifyPassword, normalizePhone } = require('../util');
+const { uid, now, verifyPassword, normalizePhone, ah } = require('../util');
 const { sign, requireAdmin } = require('../middleware/auth');
 
 const r = express.Router();
 
 /* ---- Login admin ---- */
-r.post('/login', (req, res) => {
+r.post('/login', ah(async (req, res) => {
   const phone = normalizePhone(req.body.phone);
   const password = String(req.body.password || '').trim(); // tolère les espaces parasites
-  const user = db.prepare(`SELECT * FROM users WHERE phone = ? AND role = 'admin'`).get(phone);
+  const user = await db.get(`SELECT * FROM users WHERE phone = ? AND role = 'admin'`, [phone]);
   if (!user || !verifyPassword(password, user.password_hash))
     return res.status(401).json({ error: 'Identifiants incorrects' });
   res.json({ token: sign(user), name: user.name });
-});
+}));
 
 /* ---- Tableau de bord ---- */
-r.get('/stats', requireAdmin, (req, res) => {
+r.get('/stats', requireAdmin, ah(async (req, res) => {
   const dayStart = new Date(); dayStart.setHours(0, 0, 0, 0);
-  const q = (sql, ...p) => db.prepare(sql).get(...p);
+  const d0 = dayStart.getTime();
+  const D = db.fn.dateFromMs('started_at');
+
+  const [u, ut, ct, mt, rt, tp, bt, last7] = await Promise.all([
+    db.get(`SELECT COUNT(*) n FROM users WHERE role = 'user'`),
+    db.get(`SELECT COUNT(*) n FROM users WHERE role = 'user' AND created_at >= ?`, [d0]),
+    db.get('SELECT COUNT(*) n FROM calls WHERE started_at >= ?', [d0]),
+    db.get('SELECT COALESCE(SUM(billed_sec),0) s FROM calls WHERE started_at >= ?', [d0]),
+    db.get('SELECT COALESCE(SUM(cost_cents),0) c FROM calls WHERE started_at >= ?', [d0]),
+    db.get(`SELECT COALESCE(SUM(amount_cents),0) c FROM transactions WHERE type='topup' AND created_at >= ?`, [d0]),
+    db.get('SELECT COALESCE(SUM(balance_cents),0) c FROM wallets'),
+    db.all(`SELECT ${D} d, COUNT(*) n, COALESCE(SUM(cost_cents),0) c
+            FROM calls WHERE started_at >= ? GROUP BY d ORDER BY d`, [now() - 7 * 86400_000]),
+  ]);
+
   res.json({
-    users_total: q('SELECT COUNT(*) n FROM users WHERE role = "user"').n,
-    users_today: q('SELECT COUNT(*) n FROM users WHERE role = "user" AND created_at >= ?', dayStart.getTime()).n,
-    calls_today: q('SELECT COUNT(*) n FROM calls WHERE started_at >= ?', dayStart.getTime()).n,
-    minutes_today: Math.round(q('SELECT COALESCE(SUM(billed_sec),0) s FROM calls WHERE started_at >= ?', dayStart.getTime()).s / 60),
-    revenue_today_cents: q('SELECT COALESCE(SUM(cost_cents),0) c FROM calls WHERE started_at >= ?', dayStart.getTime()).c,
-    topups_today_cents: q(`SELECT COALESCE(SUM(amount_cents),0) c FROM transactions WHERE type='topup' AND created_at >= ?`, dayStart.getTime()).c,
-    balance_total_cents: q('SELECT COALESCE(SUM(balance_cents),0) c FROM wallets').c,
-    // 7 derniers jours pour le mini-graphique
-    last7days: db.prepare(`
-      SELECT date(started_at/1000,'unixepoch') d, COUNT(*) n, COALESCE(SUM(cost_cents),0) c
-      FROM calls WHERE started_at >= ? GROUP BY d ORDER BY d`).all(now() - 7 * 86400_000),
+    users_total: Number(u.n),
+    users_today: Number(ut.n),
+    calls_today: Number(ct.n),
+    minutes_today: Math.round(Number(mt.s) / 60),
+    revenue_today_cents: Number(rt.c),
+    topups_today_cents: Number(tp.c),
+    balance_total_cents: Number(bt.c),
+    last7days: last7.map((x) => ({ d: x.d, n: Number(x.n), c: Number(x.c) })),
   });
-});
+}));
 
 /* ---- Utilisateurs ---- */
-r.get('/users', requireAdmin, (req, res) => {
-  res.json(db.prepare(`
+r.get('/users', requireAdmin, ah(async (req, res) => {
+  res.json(await db.all(`
     SELECT u.id, u.phone, u.name, u.status, u.created_at, w.balance_cents,
       (SELECT COUNT(*) FROM calls c WHERE c.user_id = u.id) AS calls
     FROM users u JOIN wallets w ON w.user_id = u.id
-    WHERE u.role = 'user' ORDER BY u.created_at DESC LIMIT 200`).all());
-});
+    WHERE u.role = 'user' ORDER BY u.created_at DESC LIMIT 200`));
+}));
 
-r.post('/users/:id/credit', requireAdmin, (req, res) => {
+r.post('/users/:id/credit', requireAdmin, ah(async (req, res) => {
   const amount = Math.round(Number(req.body.amount_cents));
   if (!Number.isFinite(amount) || amount === 0) return res.status(400).json({ error: 'Montant invalide' });
-  db.prepare('UPDATE wallets SET balance_cents = MAX(0, balance_cents + ?) WHERE user_id = ?').run(amount, req.params.id);
-  db.prepare('INSERT INTO transactions(id,user_id,type,amount_cents,method,reference,created_at) VALUES(?,?,?,?,?,?,?)')
-    .run(uid('tx'), req.params.id, 'admin_credit', amount, 'system', 'Ajustement admin', now());
+  const G = db.fn.greatest;
+  await db.run(`UPDATE wallets SET balance_cents = ${G}(0, balance_cents + ?) WHERE user_id = ?`,
+    [amount, req.params.id]);
+  await db.run(
+    'INSERT INTO transactions(id,user_id,type,amount_cents,method,reference,created_at) VALUES(?,?,?,?,?,?,?)',
+    [uid('tx'), req.params.id, 'admin_credit', amount, 'system', 'Ajustement admin', now()]);
   res.json({ ok: true });
-});
+}));
 
-r.post('/users/:id/status', requireAdmin, (req, res) => {
+r.post('/users/:id/status', requireAdmin, ah(async (req, res) => {
   const status = req.body.status === 'blocked' ? 'blocked' : 'active';
-  db.prepare(`UPDATE users SET status = ? WHERE id = ? AND role = 'user'`).run(status, req.params.id);
+  await db.run(`UPDATE users SET status = ? WHERE id = ? AND role = 'user'`, [status, req.params.id]);
   res.json({ ok: true, status });
-});
+}));
 
 /* ---- Tarifs (CRUD) ---- */
-r.get('/rates', requireAdmin, (req, res) => {
-  res.json(db.prepare('SELECT * FROM rates ORDER BY destination').all());
-});
-r.post('/rates', requireAdmin, (req, res) => {
+r.get('/rates', requireAdmin, ah(async (req, res) => {
+  res.json(await db.all('SELECT * FROM rates ORDER BY destination'));
+}));
+
+r.post('/rates', requireAdmin, ah(async (req, res) => {
   const { prefix, destination, flag = '', price_per_min_cents } = req.body;
   if (!/^\d{1,7}$/.test(String(prefix)) || !destination || !(price_per_min_cents > 0))
     return res.status(400).json({ error: 'Champs invalides' });
-  const info = db.prepare('INSERT INTO rates(prefix,destination,flag,price_per_min_cents) VALUES(?,?,?,?)')
-    .run(String(prefix), destination, flag, Math.round(price_per_min_cents));
-  res.json({ id: info.lastInsertRowid });
-});
-r.put('/rates/:id', requireAdmin, (req, res) => {
+  const row = await db.get(
+    'INSERT INTO rates(prefix,destination,flag,price_per_min_cents) VALUES(?,?,?,?) RETURNING id',
+    [String(prefix), destination, flag, Math.round(price_per_min_cents)]);
+  res.json({ id: row.id });
+}));
+
+r.put('/rates/:id', requireAdmin, ah(async (req, res) => {
   const { price_per_min_cents, active } = req.body;
   if (price_per_min_cents !== undefined)
-    db.prepare('UPDATE rates SET price_per_min_cents = ? WHERE id = ?').run(Math.round(price_per_min_cents), req.params.id);
+    await db.run('UPDATE rates SET price_per_min_cents = ? WHERE id = ?',
+      [Math.round(price_per_min_cents), req.params.id]);
   if (active !== undefined)
-    db.prepare('UPDATE rates SET active = ? WHERE id = ?').run(active ? 1 : 0, req.params.id);
+    await db.run('UPDATE rates SET active = ? WHERE id = ?', [active ? 1 : 0, req.params.id]);
   res.json({ ok: true });
-});
-r.delete('/rates/:id', requireAdmin, (req, res) => {
-  db.prepare('DELETE FROM rates WHERE id = ?').run(req.params.id);
+}));
+
+r.delete('/rates/:id', requireAdmin, ah(async (req, res) => {
+  await db.run('DELETE FROM rates WHERE id = ?', [req.params.id]);
   res.json({ ok: true });
-});
+}));
 
 /* ---- CDR & transactions ---- */
-r.get('/cdrs', requireAdmin, (req, res) => {
-  res.json(db.prepare(`
+r.get('/cdrs', requireAdmin, ah(async (req, res) => {
+  res.json(await db.all(`
     SELECT c.*, u.phone AS user_phone FROM calls c JOIN users u ON u.id = c.user_id
-    ORDER BY c.started_at DESC LIMIT 200`).all());
-});
-r.get('/transactions', requireAdmin, (req, res) => {
-  res.json(db.prepare(`
+    ORDER BY c.started_at DESC LIMIT 200`));
+}));
+
+r.get('/transactions', requireAdmin, ah(async (req, res) => {
+  res.json(await db.all(`
     SELECT t.*, u.phone AS user_phone FROM transactions t JOIN users u ON u.id = t.user_id
-    ORDER BY t.created_at DESC LIMIT 200`).all());
-});
+    ORDER BY t.created_at DESC LIMIT 200`));
+}));
 
 module.exports = r;
