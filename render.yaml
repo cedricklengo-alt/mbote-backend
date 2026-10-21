@@ -1,0 +1,13 @@
+# Configuration de déploiement Render.com — détectée automatiquement
+services:
+  - type: web
+    name: mbote-backend
+    runtime: node
+    plan: free
+    buildCommand: npm install
+    startCommand: npm start
+    envVars:
+      - key: JWT_SECRET
+        generateValue: true          # secret généré automatiquement par Render
+      - key: DEMO_MODE
+        value: "true"
