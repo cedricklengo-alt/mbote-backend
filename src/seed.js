@@ -37,12 +37,19 @@ const seed = db.transaction(() => {
     console.log(`✅ ${RATES.length} tarifs insérés`);
   }
 
-  if (!db.prepare(`SELECT 1 FROM users WHERE role = 'admin'`).get()) {
+  // Admin : créé s'il n'existe pas, et mot de passe RESYNCHRONISÉ à chaque démarrage
+  // (modifiable via la variable d'environnement ADMIN_PASSWORD)
+  const ADMIN_PASS = process.env.ADMIN_PASSWORD || 'MboteAdmin2026';
+  const admin = db.prepare(`SELECT * FROM users WHERE role = 'admin'`).get();
+  if (!admin) {
     const id = uid('u');
     db.prepare('INSERT INTO users(id,phone,name,role,password_hash,created_at) VALUES(?,?,?,?,?,?)')
-      .run(id, '+243900000000', 'Admin Mbote', 'admin', hashPassword('MboteAdmin2026'), now());
+      .run(id, '+243900000000', 'Admin Mbote', 'admin', hashPassword(ADMIN_PASS), now());
     db.prepare('INSERT INTO wallets(user_id) VALUES(?)').run(id);
-    console.log('✅ Admin créé : +243900000000 / MboteAdmin2026');
+    console.log('✅ Admin créé : +243900000000');
+  } else {
+    db.prepare('UPDATE users SET password_hash = ? WHERE id = ?').run(hashPassword(ADMIN_PASS), admin.id);
+    console.log('✅ Mot de passe admin resynchronisé');
   }
 
   if (!db.prepare('SELECT 1 FROM users WHERE phone = ?').get('+243811112222')) {

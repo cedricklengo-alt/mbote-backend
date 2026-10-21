@@ -12,8 +12,9 @@ const r = express.Router();
 /* ---- Login admin ---- */
 r.post('/login', (req, res) => {
   const phone = normalizePhone(req.body.phone);
+  const password = String(req.body.password || '').trim(); // tolère les espaces parasites
   const user = db.prepare(`SELECT * FROM users WHERE phone = ? AND role = 'admin'`).get(phone);
-  if (!user || !verifyPassword(String(req.body.password || ''), user.password_hash))
+  if (!user || !verifyPassword(password, user.password_hash))
     return res.status(401).json({ error: 'Identifiants incorrects' });
   res.json({ token: sign(user), name: user.name });
 });
