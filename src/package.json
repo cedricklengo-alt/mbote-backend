@@ -1,0 +1,17 @@
+{
+  "name": "mbote-backend",
+  "version": "1.0.0",
+  "description": "MBOTE! — Backend monolithe modulaire (auth, wallet, rating, calls, CDR, admin)",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/seed.js && node src/server.js",
+    "seed": "node src/seed.js"
+  },
+  "dependencies": {
+    "better-sqlite3": "^12.11.1",
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2",
+    "jsonwebtoken": "^9.0.2",
+    "pg": "^8.13.1"
+  }
+}
