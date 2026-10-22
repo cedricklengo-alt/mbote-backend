@@ -83,6 +83,7 @@ input:focus{outline:none;border-color:var(--soleil);}
       <button data-v="users">👥 Utilisateurs</button>
       <button data-v="rates">💱 Tarifs</button>
       <button data-v="cdrs">📞 Appels (CDR)</button>
+      <button data-v="pays">📲 Paiements</button>
       <button data-v="txs">💰 Transactions</button>
     </nav>
     <div style="position:absolute;bottom:22px;left:14px;right:14px;">
@@ -126,6 +127,13 @@ input:focus{outline:none;border-color:var(--soleil);}
       <h1>Appels (CDR)</h1><div class="sub">Tickets d'appel — base de la facturation</div>
       <table><thead><tr><th>Date</th><th>Utilisateur</th><th>Destination</th><th>Numéro</th><th>Durée</th><th>Coût</th><th>Fin</th></tr></thead>
       <tbody id="tcdrs"></tbody></table>
+    </section>
+
+    <!-- PAYMENTS -->
+    <section id="v-pays" class="hide">
+      <h1>Paiements Mobile Money</h1><div class="sub">Recharges via l'agrégateur (M-Pesa, Orange Money, Airtel Money) — statut en direct</div>
+      <table><thead><tr><th>Date</th><th>Utilisateur</th><th>Payeur</th><th>Méthode</th><th>Montant</th><th>Bonus</th><th>Référence</th><th>Fournisseur</th><th>Statut</th></tr></thead>
+      <tbody id="tpays"></tbody></table>
     </section>
 
     <!-- TXS -->
@@ -249,6 +257,18 @@ async function load(v){
       <td>${$d(c.started_at)}</td><td>${c.user_phone}</td><td>${c.destination||'—'}</td><td>${c.callee}</td>
       <td>${dur(c.billed_sec||0)}</td><td><b style="color:var(--soleil)">${$m(c.cost_cents||0)}</b></td>
       <td><span class="tag ${c.hangup_cause==='no_credit'?'ko':'g'}">${({user_hangup:'Raccroché',no_credit:'Crédit épuisé'})[c.hangup_cause]||c.status}</span></td></tr>`).join('');
+  }
+  if(v==='pays'){
+    const ps=await API('/payments');
+    const st={pending:['g','En attente'],success:['ok','Réussi'],failed:['ko','Échoué']};
+    const mlbl={mpesa:'M-Pesa',orange:'Orange Money',airtel:'Airtel Money',card:'Carte'};
+    $('tpays').innerHTML=ps.length?ps.map(p=>`<tr>
+      <td>${$d(p.created_at)}</td><td>${p.user_phone}</td><td>${p.phone}</td><td>${mlbl[p.method]||p.method}</td>
+      <td><b style="color:var(--soleil)">${$m(p.amount_cents)}</b></td>
+      <td>${p.bonus_cents?'+'+$m(p.bonus_cents):'—'}</td>
+      <td style="font-size:11px">${p.reference}</td><td>${p.provider}</td>
+      <td><span class="tag ${(st[p.status]||['g'])[0]}">${(st[p.status]||[,p.status])[1]}</span></td></tr>`).join('')
+      :'<tr><td colspan="9" style="color:var(--kaki)">Aucun paiement pour l\'instant — faites une recharge depuis l\'app 📲</td></tr>';
   }
   if(v==='txs'){
     const ts=await API('/transactions');

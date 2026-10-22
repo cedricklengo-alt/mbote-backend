@@ -112,6 +112,12 @@ r.get('/cdrs', requireAdmin, ah(async (req, res) => {
     ORDER BY c.started_at DESC LIMIT 200`));
 }));
 
+r.get('/payments', requireAdmin, ah(async (req, res) => {
+  res.json(await db.all(`
+    SELECT p.*, u.phone AS user_phone FROM payments p JOIN users u ON u.id = p.user_id
+    ORDER BY p.created_at DESC LIMIT 200`));
+}));
+
 r.get('/transactions', requireAdmin, ah(async (req, res) => {
   res.json(await db.all(`
     SELECT t.*, u.phone AS user_phone FROM transactions t JOIN users u ON u.id = t.user_id

@@ -66,6 +66,21 @@ CREATE TABLE IF NOT EXISTS otps (
   code       TEXT NOT NULL,
   expires_at INTEGER NOT NULL
 );
+CREATE TABLE IF NOT EXISTS payments (
+  id           TEXT PRIMARY KEY,
+  user_id      TEXT NOT NULL REFERENCES users(id),
+  amount_cents INTEGER NOT NULL,
+  bonus_cents  INTEGER NOT NULL DEFAULT 0,
+  currency     TEXT NOT NULL DEFAULT 'USD',
+  method       TEXT NOT NULL,
+  phone        TEXT NOT NULL,
+  provider     TEXT NOT NULL,
+  order_number TEXT,
+  reference    TEXT UNIQUE NOT NULL,
+  status       TEXT NOT NULL DEFAULT 'pending',
+  created_at   INTEGER NOT NULL,
+  updated_at   INTEGER
+);
 `;
 
 let db;
