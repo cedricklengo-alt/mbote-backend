@@ -48,7 +48,7 @@ r.post('/:id/buy', requireAuth, ah(async (req, res) => {
   });
 
   if (result === null)
-    return res.status(402).json({ error: 'Solde insuffisant — rechargez votre compte' });
+    return res.status(402).json({ error: 'Solde insuffisant — recharge ton compte' });
   res.json({ ok: true, name: pack.name, balance_cents: result });
 }));
 

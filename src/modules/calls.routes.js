@@ -90,7 +90,7 @@ r.post('/start', requireAuth, ah(async (req, res) => {
       price = discounted(rate.price_per_min_cents, promo);
       const w = await db.get('SELECT balance_cents FROM wallets WHERE user_id = ?', [req.user.id]);
       if (w.balance_cents < Math.ceil(price / 2))
-        return res.status(402).json({ error: 'Crédit insuffisant — rechargez votre compte', code: 'NO_CREDIT' });
+        return res.status(402).json({ error: 'Crédit insuffisant — recharge ton compte', code: 'NO_CREDIT' });
       maxSec = Math.floor((w.balance_cents * 60) / price);
     }
   }

@@ -53,7 +53,7 @@ r.post('/', requireAuth, ah(async (req, res) => {
         'INSERT INTO transactions(id,user_id,type,amount_cents,method,reference,created_at) VALUES(?,?,?,?,?,?,?)',
         [uid('tx'), req.user.id, 'refund', amount, 'system', 'Remboursement crédit GSM', now()]);
     });
-    return res.status(502).json({ error: 'Recharge impossible chez l\'opérateur — vous avez été remboursé' });
+    return res.status(502).json({ error: 'Recharge impossible chez l\'opérateur — tu as été remboursé' });
   }
 
   const w = await db.get('SELECT balance_cents FROM wallets WHERE user_id = ?', [req.user.id]);
