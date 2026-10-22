@@ -84,6 +84,8 @@ input:focus{outline:none;border-color:var(--soleil);}
       <button data-v="rates">💱 Tarifs</button>
       <button data-v="cdrs">📞 Appels (CDR)</button>
       <button data-v="pays">📲 Paiements</button>
+      <button data-v="packs">📦 Forfaits</button>
+      <button data-v="air">📱 Airtime</button>
       <button data-v="promos">🎉 Promos</button>
       <button data-v="txs">💰 Transactions</button>
     </nav>
@@ -135,6 +137,28 @@ input:focus{outline:none;border-color:var(--soleil);}
       <h1>Paiements Mobile Money</h1><div class="sub">Recharges via l'agrégateur (M-Pesa, Orange Money, Airtel Money) — statut en direct</div>
       <table><thead><tr><th>Date</th><th>Utilisateur</th><th>Payeur</th><th>Méthode</th><th>Montant</th><th>Bonus</th><th>Référence</th><th>Fournisseur</th><th>Statut</th></tr></thead>
       <tbody id="tpays"></tbody></table>
+    </section>
+
+    <!-- PACKAGES -->
+    <section id="v-packs" class="hide">
+      <h1>Forfaits</h1><div class="sub">Pass et packs de minutes achetés avec le solde (minutes = 0 → illimité)</div>
+      <div class="row">
+        <input id="kname" placeholder="Nom (ex: Pass RDC Illimité)" style="width:220px">
+        <input id="kprice" type="number" placeholder="Prix ¢" style="width:90px">
+        <input id="kprefix" placeholder="Préfixe (vide = tout)" style="width:150px">
+        <input id="kmin" type="number" placeholder="Minutes (0=∞)" style="width:120px">
+        <input id="kdays" type="number" placeholder="Jours" style="width:80px">
+        <button class="b p" onclick="addPack()">+ Créer</button>
+      </div>
+      <table><thead><tr><th>Nom</th><th>Prix</th><th>Destinations</th><th>Minutes</th><th>Durée</th><th>Statut</th><th>Actions</th></tr></thead>
+      <tbody id="tpacks"></tbody></table>
+    </section>
+
+    <!-- AIRTIME -->
+    <section id="v-air" class="hide">
+      <h1>Recharges airtime</h1><div class="sub">Crédit GSM offert à des proches (Vodacom, Orange, Airtel…)</div>
+      <table><thead><tr><th>Date</th><th>Utilisateur</th><th>Bénéficiaire</th><th>Opérateur</th><th>Montant</th><th>Fournisseur</th><th>Statut</th></tr></thead>
+      <tbody id="tair"></tbody></table>
     </section>
 
     <!-- PROMOS -->
@@ -285,6 +309,27 @@ async function load(v){
       <td><span class="tag ${(st[p.status]||['g'])[0]}">${(st[p.status]||[,p.status])[1]}</span></td></tr>`).join('')
       :'<tr><td colspan="9" style="color:var(--kaki)">Aucun paiement pour l\'instant — faites une recharge depuis l\'app 📲</td></tr>';
   }
+  if(v==='packs'){
+    const ks=await API('/packages');
+    $('tpacks').innerHTML=ks.length?ks.map(k=>`<tr>
+      <td>${k.name}</td><td><b style="color:var(--soleil)">${$m(k.price_cents)}</b></td>
+      <td>${k.prefix?('+'+k.prefix+'…'):'🌍 Toutes'}</td>
+      <td>${k.minutes===0?'<b style="color:var(--savane)">Illimité</b>':k.minutes+' min'}</td>
+      <td>${k.days} j</td>
+      <td><span class="tag ${k.active?'ok':'ko'}">${k.active?'Actif':'Inactif'}</span></td>
+      <td><button class="b o" onclick="togglePack(${k.id},${k.active})">${k.active?'Désactiver':'Activer'}</button>
+          <button class="b r" onclick="delPack(${k.id})">✕</button></td></tr>`).join('')
+      :'<tr><td colspan="7" style="color:var(--kaki)">Aucun forfait</td></tr>';
+  }
+  if(v==='air'){
+    const as=await API('/airtime');
+    const st={pending:['g','En cours'],success:['ok','Envoyé'],failed:['ko','Échoué (remboursé)']};
+    $('tair').innerHTML=as.length?as.map(a=>`<tr>
+      <td>${$d(a.created_at)}</td><td>${a.user_phone}</td><td>${a.phone}</td><td>${a.operator||'—'}</td>
+      <td><b style="color:var(--soleil)">${$m(a.amount_cents)}</b></td><td>${a.provider}</td>
+      <td><span class="tag ${(st[a.status]||['g'])[0]}">${(st[a.status]||[,a.status])[1]}</span></td></tr>`).join('')
+      :'<tr><td colspan="7" style="color:var(--kaki)">Aucune recharge airtime pour l\'instant</td></tr>';
+  }
   if(v==='promos'){
     const ps=await API('/promos');
     $('tpromos').innerHTML=ps.length?ps.map(p=>`<tr>
@@ -324,6 +369,18 @@ async function editRate(id,cur){
 }
 async function toggleRate(id,a){await POST(`/rates/${id}`,{active:!a},'PUT');load('rates');}
 async function delRate(id){if(confirm('Supprimer ce tarif ?')){await POST(`/rates/${id}`,{},'DELETE');load('rates');}}
+
+/* ---- forfaits ---- */
+async function addPack(){
+  const body={name:$('kname').value.trim(),price_cents:parseInt($('kprice').value),
+    prefix:$('kprefix').value.trim(),minutes:parseInt($('kmin').value)||0,days:parseInt($('kdays').value)||30};
+  if(!body.name||!(body.price_cents>0)){toast('Nom + prix requis');return;}
+  await POST('/packages',body);
+  ['kname','kprice','kprefix','kmin','kdays'].forEach(i=>$(i).value='');
+  toast('Forfait créé 📦');load('packs');
+}
+async function togglePack(id,active){await POST(`/packages/${id}`,{active:!active},'PUT');load('packs');}
+async function delPack(id){if(confirm('Supprimer ce forfait ?')){await POST(`/packages/${id}`,{},'DELETE');load('packs');}}
 
 /* ---- promos ---- */
 async function addPromo(){

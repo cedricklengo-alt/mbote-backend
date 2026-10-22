@@ -90,6 +90,37 @@ CREATE TABLE IF NOT EXISTS promos (
   starts_at    INTEGER NOT NULL DEFAULT 0,
   ends_at      INTEGER NOT NULL DEFAULT 0
 );
+CREATE TABLE IF NOT EXISTS packages (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  name        TEXT NOT NULL,
+  price_cents INTEGER NOT NULL,
+  prefix      TEXT NOT NULL DEFAULT '',
+  minutes     INTEGER NOT NULL DEFAULT 0,
+  days        INTEGER NOT NULL DEFAULT 30,
+  active      INTEGER NOT NULL DEFAULT 1
+);
+CREATE TABLE IF NOT EXISTS user_packages (
+  id            TEXT PRIMARY KEY,
+  user_id       TEXT NOT NULL REFERENCES users(id),
+  package_id    INTEGER NOT NULL,
+  name          TEXT NOT NULL,
+  prefix        TEXT NOT NULL DEFAULT '',
+  remaining_sec INTEGER NOT NULL DEFAULT 0,
+  unlimited     INTEGER NOT NULL DEFAULT 0,
+  expires_at    INTEGER NOT NULL,
+  purchased_at  INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS airtime_topups (
+  id           TEXT PRIMARY KEY,
+  user_id      TEXT NOT NULL REFERENCES users(id),
+  phone        TEXT NOT NULL,
+  operator     TEXT,
+  amount_cents INTEGER NOT NULL,
+  status       TEXT NOT NULL DEFAULT 'pending',
+  provider     TEXT NOT NULL,
+  reference    TEXT,
+  created_at   INTEGER NOT NULL
+);
 `;
 
 // Colonnes ajoutées après la V1 (ALTER sans IF NOT EXISTS en SQLite → try/catch)
@@ -97,6 +128,7 @@ const MIGRATIONS = [
   `ALTER TABLE users ADD COLUMN referral_code TEXT`,
   `ALTER TABLE users ADD COLUMN referred_by TEXT`,
   `ALTER TABLE users ADD COLUMN referral_rewarded INTEGER DEFAULT 0`,
+  `ALTER TABLE calls ADD COLUMN user_package_id TEXT`,
 ];
 
 let db;

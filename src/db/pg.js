@@ -93,9 +93,41 @@ CREATE TABLE IF NOT EXISTS promos (
   starts_at    BIGINT NOT NULL DEFAULT 0,
   ends_at      BIGINT NOT NULL DEFAULT 0
 );
+CREATE TABLE IF NOT EXISTS packages (
+  id          SERIAL PRIMARY KEY,
+  name        TEXT NOT NULL,
+  price_cents BIGINT NOT NULL,
+  prefix      TEXT NOT NULL DEFAULT '',
+  minutes     INTEGER NOT NULL DEFAULT 0,
+  days        INTEGER NOT NULL DEFAULT 30,
+  active      INTEGER NOT NULL DEFAULT 1
+);
+CREATE TABLE IF NOT EXISTS user_packages (
+  id            TEXT PRIMARY KEY,
+  user_id       TEXT NOT NULL REFERENCES users(id),
+  package_id    INTEGER NOT NULL,
+  name          TEXT NOT NULL,
+  prefix        TEXT NOT NULL DEFAULT '',
+  remaining_sec INTEGER NOT NULL DEFAULT 0,
+  unlimited     INTEGER NOT NULL DEFAULT 0,
+  expires_at    BIGINT NOT NULL,
+  purchased_at  BIGINT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS airtime_topups (
+  id           TEXT PRIMARY KEY,
+  user_id      TEXT NOT NULL REFERENCES users(id),
+  phone        TEXT NOT NULL,
+  operator     TEXT,
+  amount_cents BIGINT NOT NULL,
+  status       TEXT NOT NULL DEFAULT 'pending',
+  provider     TEXT NOT NULL,
+  reference    TEXT,
+  created_at   BIGINT NOT NULL
+);
 ALTER TABLE users ADD COLUMN IF NOT EXISTS referral_code TEXT;
 ALTER TABLE users ADD COLUMN IF NOT EXISTS referred_by TEXT;
 ALTER TABLE users ADD COLUMN IF NOT EXISTS referral_rewarded INTEGER DEFAULT 0;
+ALTER TABLE calls ADD COLUMN IF NOT EXISTS user_package_id TEXT;
 `;
 
 // Convertit les placeholders « ? » (style SQLite) en « $1, $2… » (style PG)

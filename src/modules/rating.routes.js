@@ -24,8 +24,30 @@ async function findRate(phoneE164) {
 r.get('/lookup', requireAuth, ah(async (req, res) => {
   const phone = normalizePhone(req.query.phone);
   if (!phone) return res.status(400).json({ error: 'Numéro invalide' });
+
+  // 💚 Appelé déjà sur MBOTE! → GRATUIT
+  const toUser = await db.get(
+    `SELECT id FROM users WHERE phone = ? AND role = 'user' AND status = 'active'`, [phone]);
+  if (toUser && toUser.id !== req.user.id) {
+    return res.json({
+      destination: 'MBOTE → MBOTE', flag: '💚',
+      price_per_min_cents: 0, free_reason: 'mbote', max_minutes: 240,
+    });
+  }
+
   const rate = await findRate(phone);
   if (!rate) return res.status(404).json({ error: 'Destination non couverte' });
+
+  // 📦 Forfait actif → GRATUIT (minutes du forfait)
+  const packages = require('../services/packages');
+  const pack = await packages.findActive(req.user.id, phone);
+  if (pack) {
+    return res.json({
+      destination: rate.destination, flag: rate.flag,
+      price_per_min_cents: 0, free_reason: 'package', package_name: pack.name,
+      max_minutes: pack.unlimited ? 240 : Math.floor(pack.remaining_sec / 60),
+    });
+  }
 
   // 🎉 Happy hour éventuelle sur cette destination
   const promo = await bestPromoFor(phone);

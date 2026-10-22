@@ -9,6 +9,7 @@ const { findRate } = require('./rating.routes');
 const { getProvider } = require('../providers');
 const { bestPromoFor, discounted } = require('../services/promos');
 const referral = require('../services/referral');
+const packages = require('../services/packages');
 
 const r = express.Router();
 
@@ -39,6 +40,9 @@ async function finalize(call, cause) {
     await t.run(
       `UPDATE calls SET status='ended', ended_at=?, billed_sec=?, cost_cents=?, hangup_cause=? WHERE id=?`,
       [now(), elapsed, cost, cause, call.id]);
+    // 📦 Décompte des minutes du forfait utilisé
+    if (call.user_package_id && elapsed > 0)
+      await packages.consumeInsideTx(t, call.user_package_id, elapsed);
     if (cost > 0) {
       await t.run(`UPDATE wallets SET balance_cents = ${G}(0, balance_cents - ?) WHERE user_id = ?`,
         [cost, call.user_id]);
@@ -61,31 +65,49 @@ r.post('/start', requireAuth, ah(async (req, res) => {
   const active = await db.get(`SELECT id FROM calls WHERE user_id=? AND status != 'ended'`, [req.user.id]);
   if (active) return res.status(409).json({ error: 'Un appel est déjà en cours' });
 
-  // AUTORISATION temps réel : tarif + solde AVANT de connecter (règle d'or)
-  const rate = await findRate(to);
-  if (!rate) return res.status(404).json({ error: 'Destination non couverte' });
+  const FREE_CAP_SEC = 4 * 3600; // 4 h max par appel gratuit
+  let price, maxSec, destination, flag, promo = null, packId = null, freeReason = null;
 
-  // 🎉 Happy hour : le prix remisé est figé dans le CDR au moment de l'appel
-  const promo = await bestPromoFor(to);
-  const price = discounted(rate.price_per_min_cents, promo);
+  // 💚 1. Appel MBOTE → MBOTE : GRATUIT si l'appelé a l'app
+  const toUser = await db.get(
+    `SELECT id FROM users WHERE phone = ? AND role = 'user' AND status = 'active'`, [to]);
+  if (toUser && toUser.id !== req.user.id) {
+    price = 0; destination = 'MBOTE → MBOTE'; flag = '💚';
+    maxSec = FREE_CAP_SEC; freeReason = 'mbote';
+  } else {
+    const rate = await findRate(to);
+    if (!rate) return res.status(404).json({ error: 'Destination non couverte' });
+    destination = rate.destination; flag = rate.flag;
 
-  const w = await db.get('SELECT balance_cents FROM wallets WHERE user_id = ?', [req.user.id]);
-  if (w.balance_cents < Math.ceil(price / 2))
-    return res.status(402).json({ error: 'Crédit insuffisant — rechargez votre compte', code: 'NO_CREDIT' });
+    // 📦 2. Forfait actif couvrant la destination
+    const pack = await packages.findActive(req.user.id, to);
+    if (pack) {
+      price = 0; packId = pack.id; freeReason = 'package';
+      maxSec = pack.unlimited ? FREE_CAP_SEC : Math.min(FREE_CAP_SEC, pack.remaining_sec);
+    } else {
+      // 🎉 3. Tarif à la minute (remisé si Happy Hour)
+      promo = await bestPromoFor(to);
+      price = discounted(rate.price_per_min_cents, promo);
+      const w = await db.get('SELECT balance_cents FROM wallets WHERE user_id = ?', [req.user.id]);
+      if (w.balance_cents < Math.ceil(price / 2))
+        return res.status(402).json({ error: 'Crédit insuffisant — rechargez votre compte', code: 'NO_CREDIT' });
+      maxSec = Math.floor((w.balance_cents * 60) / price);
+    }
+  }
 
-  const maxSec = Math.floor((w.balance_cents * 60) / price);
   const id = uid('ca');
   await db.run(
-    `INSERT INTO calls(id,user_id,callee,destination,price_per_min_cents,max_sec,status,started_at)
-     VALUES(?,?,?,?,?,?,'ringing',?)`,
-    [id, req.user.id, to, rate.destination, price, maxSec, now()]);
+    `INSERT INTO calls(id,user_id,callee,destination,price_per_min_cents,max_sec,status,started_at,user_package_id)
+     VALUES(?,?,?,?,?,?,'ringing',?,?)`,
+    [id, req.user.id, to, destination, price, maxSec, now(), packId]);
 
   getProvider().placeCall({ callId: id, to });
 
   res.json({
     call_id: id,
-    destination: rate.destination, flag: rate.flag,
+    destination, flag,
     price_per_min_cents: price,
+    free_reason: freeReason, // 'mbote' | 'package' | null
     promo: promo ? { title: promo.title, discount_pct: promo.discount_pct } : null,
     max_sec: maxSec,
     provider: getProvider().name,

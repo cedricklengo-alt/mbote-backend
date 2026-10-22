@@ -43,6 +43,16 @@ async function main() {
       console.log(`✅ ${RATES.length} tarifs insérés`);
     }
 
+    // 📦 Forfaits par défaut (modifiables depuis la console admin)
+    const pk = await t.get('SELECT COUNT(*) n FROM packages');
+    if (Number(pk.n) === 0) {
+      await t.run('INSERT INTO packages(name,price_cents,prefix,minutes,days) VALUES(?,?,?,?,?)',
+        ['Pack RDC 100 minutes', 700, '243', 100, 30]);
+      await t.run('INSERT INTO packages(name,price_cents,prefix,minutes,days) VALUES(?,?,?,?,?)',
+        ['Pass RDC Illimité 30 jours', 1500, '243', 0, 30]);
+      console.log('✅ 2 forfaits par défaut insérés');
+    }
+
     // Admin : créé s'il n'existe pas, et mot de passe RESYNCHRONISÉ à chaque démarrage
     // (modifiable via la variable d'environnement ADMIN_PASSWORD)
     const ADMIN_PASS = process.env.ADMIN_PASSWORD || 'MboteAdmin2026';

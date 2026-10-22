@@ -34,6 +34,8 @@ app.use('/api/rates', require('./modules/rating.routes').router);
 app.use('/api/calls', require('./modules/calls.routes'));
 app.use('/api/contacts', require('./modules/contacts.routes'));
 app.use('/api/referral', require('./modules/referral.routes'));
+app.use('/api/packages', require('./modules/packages.routes'));
+app.use('/api/airtime', require('./modules/airtime.routes'));
 app.use('/api/payments', require('./modules/payments.routes')); // webhook agrégateur (public)
 app.use('/api/admin', require('./modules/admin.routes'));
 
