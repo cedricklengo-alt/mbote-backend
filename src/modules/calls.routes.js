@@ -7,6 +7,8 @@ const { uid, now, normalizePhone, costFor, ah } = require('../util');
 const { requireAuth } = require('../middleware/auth');
 const { findRate } = require('./rating.routes');
 const { getProvider } = require('../providers');
+const { bestPromoFor, discounted } = require('../services/promos');
+const referral = require('../services/referral');
 
 const r = express.Router();
 
@@ -43,6 +45,8 @@ async function finalize(call, cause) {
       await t.run(
         'INSERT INTO transactions(id,user_id,type,amount_cents,method,reference,created_at) VALUES(?,?,?,?,?,?,?)',
         [uid('tx'), call.user_id, 'call_debit', -cost, 'system', `Appel ${call.callee} (${elapsed}s)`, now()]);
+      // 🤝 Premier appel facturé d'un filleul → 1 $ pour lui + 1 $ pour le parrain
+      await referral.maybeRewardInsideTx(t, call.user_id);
     }
   });
   try { getProvider().hangup(call); } catch { /* best effort */ }
@@ -61,23 +65,28 @@ r.post('/start', requireAuth, ah(async (req, res) => {
   const rate = await findRate(to);
   if (!rate) return res.status(404).json({ error: 'Destination non couverte' });
 
+  // 🎉 Happy hour : le prix remisé est figé dans le CDR au moment de l'appel
+  const promo = await bestPromoFor(to);
+  const price = discounted(rate.price_per_min_cents, promo);
+
   const w = await db.get('SELECT balance_cents FROM wallets WHERE user_id = ?', [req.user.id]);
-  if (w.balance_cents < Math.ceil(rate.price_per_min_cents / 2))
+  if (w.balance_cents < Math.ceil(price / 2))
     return res.status(402).json({ error: 'Crédit insuffisant — rechargez votre compte', code: 'NO_CREDIT' });
 
-  const maxSec = Math.floor((w.balance_cents * 60) / rate.price_per_min_cents);
+  const maxSec = Math.floor((w.balance_cents * 60) / price);
   const id = uid('ca');
   await db.run(
     `INSERT INTO calls(id,user_id,callee,destination,price_per_min_cents,max_sec,status,started_at)
      VALUES(?,?,?,?,?,?,'ringing',?)`,
-    [id, req.user.id, to, rate.destination, rate.price_per_min_cents, maxSec, now()]);
+    [id, req.user.id, to, rate.destination, price, maxSec, now()]);
 
   getProvider().placeCall({ callId: id, to });
 
   res.json({
     call_id: id,
     destination: rate.destination, flag: rate.flag,
-    price_per_min_cents: rate.price_per_min_cents,
+    price_per_min_cents: price,
+    promo: promo ? { title: promo.title, discount_pct: promo.discount_pct } : null,
     max_sec: maxSec,
     provider: getProvider().name,
   });

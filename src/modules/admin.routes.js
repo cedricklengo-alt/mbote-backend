@@ -105,6 +105,33 @@ r.delete('/rates/:id', requireAdmin, ah(async (req, res) => {
   res.json({ ok: true });
 }));
 
+/* ---- Promos / Happy Hours ---- */
+r.get('/promos', requireAdmin, ah(async (req, res) => {
+  res.json(await db.all('SELECT * FROM promos ORDER BY id DESC'));
+}));
+
+r.post('/promos', requireAdmin, ah(async (req, res) => {
+  const { title, discount_pct, prefix = '', starts_at = 0, ends_at = 0 } = req.body;
+  const pct = Math.round(Number(discount_pct));
+  if (!title || !(pct >= 1 && pct <= 90))
+    return res.status(400).json({ error: 'Titre requis, remise entre 1 et 90 %' });
+  const row = await db.get(
+    'INSERT INTO promos(title,discount_pct,prefix,starts_at,ends_at) VALUES(?,?,?,?,?) RETURNING id',
+    [String(title).slice(0, 80), pct, String(prefix).replace(/\D/g, ''), Number(starts_at) || 0, Number(ends_at) || 0]);
+  res.json({ id: row.id });
+}));
+
+r.put('/promos/:id', requireAdmin, ah(async (req, res) => {
+  if (req.body.active !== undefined)
+    await db.run('UPDATE promos SET active = ? WHERE id = ?', [req.body.active ? 1 : 0, req.params.id]);
+  res.json({ ok: true });
+}));
+
+r.delete('/promos/:id', requireAdmin, ah(async (req, res) => {
+  await db.run('DELETE FROM promos WHERE id = ?', [req.params.id]);
+  res.json({ ok: true });
+}));
+
 /* ---- CDR & transactions ---- */
 r.get('/cdrs', requireAdmin, ah(async (req, res) => {
   res.json(await db.all(`

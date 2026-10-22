@@ -71,7 +71,50 @@ r.get('/topup/:id/status', requireAuth, ah(async (req, res) => {
   });
 }));
 
-/* 3) Historique des recharges */
+/* 3) 💸 Transfert de crédit MBOTE → MBOTE (le différenciateur diaspora) */
+r.post('/transfer', requireAuth, ah(async (req, res) => {
+  const toPhone = normalizePhone(req.body.to_phone);
+  const amount = Math.round(Number(req.body.amount_cents));
+
+  if (!toPhone) return res.status(400).json({ error: 'Numéro du bénéficiaire invalide' });
+  if (toPhone === req.user.phone) return res.status(400).json({ error: 'Impossible de s\'envoyer du crédit à soi-même' });
+  if (!Number.isFinite(amount) || amount < 50 || amount > 50_000)
+    return res.status(400).json({ error: 'Montant entre 0,50 $ et 500 $' });
+
+  const dest = await db.get(`SELECT id, name, phone, status FROM users WHERE phone = ? AND role = 'user'`, [toPhone]);
+  if (!dest) return res.status(404).json({ error: 'Ce numéro n\'a pas encore de compte MBOTE! — invitez-le avec votre code parrain 🎁' });
+  if (dest.status === 'blocked') return res.status(403).json({ error: 'Le compte du bénéficiaire est bloqué' });
+
+  const { uid: mkId, now: ts } = require('../util');
+  const result = await db.tx(async (t) => {
+    // Débit ATOMIQUE : échoue si le solde est insuffisant (pas de découvert possible)
+    const deb = await t.get(
+      'UPDATE wallets SET balance_cents = balance_cents - ? WHERE user_id = ? AND balance_cents >= ? RETURNING balance_cents',
+      [amount, req.user.id, amount]);
+    if (!deb) return null;
+
+    await t.run('UPDATE wallets SET balance_cents = balance_cents + ? WHERE user_id = ?', [amount, dest.id]);
+    await t.run(
+      'INSERT INTO transactions(id,user_id,type,amount_cents,method,reference,created_at) VALUES(?,?,?,?,?,?,?)',
+      [mkId('tx'), req.user.id, 'transfer_out', -amount, 'wallet', `Envoyé à ${dest.name || dest.phone}`, ts()]);
+    await t.run(
+      'INSERT INTO transactions(id,user_id,type,amount_cents,method,reference,created_at) VALUES(?,?,?,?,?,?,?)',
+      [mkId('tx'), dest.id, 'transfer_in', amount, 'wallet', `Reçu de ${req.user.name || req.user.phone}`, ts()]);
+    return deb.balance_cents;
+  });
+
+  if (result === null)
+    return res.status(402).json({ error: 'Solde insuffisant pour ce transfert' });
+
+  res.json({
+    ok: true,
+    sent_cents: amount,
+    to: { name: dest.name, phone: dest.phone },
+    balance_cents: result,
+  });
+}));
+
+/* 4) Historique des recharges */
 r.get('/payments', requireAuth, ah(async (req, res) => {
   res.json(await db.all(
     `SELECT id, amount_cents, bonus_cents, method, phone, status, reference, created_at

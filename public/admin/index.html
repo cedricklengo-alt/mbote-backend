@@ -84,6 +84,7 @@ input:focus{outline:none;border-color:var(--soleil);}
       <button data-v="rates">💱 Tarifs</button>
       <button data-v="cdrs">📞 Appels (CDR)</button>
       <button data-v="pays">📲 Paiements</button>
+      <button data-v="promos">🎉 Promos</button>
       <button data-v="txs">💰 Transactions</button>
     </nav>
     <div style="position:absolute;bottom:22px;left:14px;right:14px;">
@@ -134,6 +135,20 @@ input:focus{outline:none;border-color:var(--soleil);}
       <h1>Paiements Mobile Money</h1><div class="sub">Recharges via l'agrégateur (M-Pesa, Orange Money, Airtel Money) — statut en direct</div>
       <table><thead><tr><th>Date</th><th>Utilisateur</th><th>Payeur</th><th>Méthode</th><th>Montant</th><th>Bonus</th><th>Référence</th><th>Fournisseur</th><th>Statut</th></tr></thead>
       <tbody id="tpays"></tbody></table>
+    </section>
+
+    <!-- PROMOS -->
+    <section id="v-promos" class="hide">
+      <h1>Promos &amp; Happy Hours</h1><div class="sub">Remises temporaires appliquées automatiquement dans l'app (la meilleure remise gagne)</div>
+      <div class="row">
+        <input id="ptitle" placeholder="Titre (ex: Dimanche RDC −30%)" style="width:240px">
+        <input id="ppct" type="number" placeholder="% remise" style="width:90px">
+        <input id="pprefix" placeholder="Préfixe (vide = tout)" style="width:150px">
+        <input id="pdays" type="number" placeholder="Durée (jours, vide = ∞)" style="width:170px">
+        <button class="b p" onclick="addPromo()">+ Lancer</button>
+      </div>
+      <table><thead><tr><th>Titre</th><th>Remise</th><th>Destinations</th><th>Fin</th><th>Statut</th><th>Actions</th></tr></thead>
+      <tbody id="tpromos"></tbody></table>
     </section>
 
     <!-- TXS -->
@@ -270,9 +285,21 @@ async function load(v){
       <td><span class="tag ${(st[p.status]||['g'])[0]}">${(st[p.status]||[,p.status])[1]}</span></td></tr>`).join('')
       :'<tr><td colspan="9" style="color:var(--kaki)">Aucun paiement pour l\'instant — faites une recharge depuis l\'app 📲</td></tr>';
   }
+  if(v==='promos'){
+    const ps=await API('/promos');
+    $('tpromos').innerHTML=ps.length?ps.map(p=>`<tr>
+      <td>${p.title}</td><td><b style="color:var(--soleil)">−${p.discount_pct}%</b></td>
+      <td>${p.prefix?('+'+p.prefix+'…'):'🌍 Toutes'}</td>
+      <td>${Number(p.ends_at)?$d(Number(p.ends_at)):'∞'}</td>
+      <td><span class="tag ${p.active?'ok':'ko'}">${p.active?'Active':'Inactive'}</span></td>
+      <td><button class="b o" onclick="togglePromo(${p.id},${p.active})">${p.active?'Suspendre':'Réactiver'}</button>
+          <button class="b r" onclick="delPromo(${p.id})">✕</button></td></tr>`).join('')
+      :'<tr><td colspan="6" style="color:var(--kaki)">Aucune promo — lancez votre première Happy Hour 🎉</td></tr>';
+  }
   if(v==='txs'){
     const ts=await API('/transactions');
-    const lbl={topup:'Recharge',call_debit:'Appel',bonus:'Bonus',admin_credit:'Ajustement'};
+    const lbl={topup:'Recharge',call_debit:'Appel',bonus:'Bonus',admin_credit:'Ajustement',
+      transfer_in:'Crédit reçu',transfer_out:'Crédit envoyé',referral_bonus:'Parrainage'};
     $('ttxs').innerHTML=ts.map(t=>`<tr>
       <td>${$d(t.created_at)}</td><td>${t.user_phone}</td><td>${lbl[t.type]||t.type}</td>
       <td style="color:${t.amount_cents>=0?'var(--savane)':'var(--rouge)'};font-weight:700">${t.amount_cents>=0?'+':''}${$m(t.amount_cents)}</td>
@@ -297,6 +324,20 @@ async function editRate(id,cur){
 }
 async function toggleRate(id,a){await POST(`/rates/${id}`,{active:!a},'PUT');load('rates');}
 async function delRate(id){if(confirm('Supprimer ce tarif ?')){await POST(`/rates/${id}`,{},'DELETE');load('rates');}}
+
+/* ---- promos ---- */
+async function addPromo(){
+  const days=parseInt($('pdays').value);
+  const body={title:$('ptitle').value.trim(),discount_pct:parseInt($('ppct').value),
+    prefix:$('pprefix').value.trim(),
+    ends_at: days>0 ? Date.now()+days*86400000 : 0};
+  if(!body.title||!(body.discount_pct>=1&&body.discount_pct<=90)){toast('Titre + remise entre 1 et 90 % requis');return;}
+  await POST('/promos',body);
+  $('ptitle').value='';$('ppct').value='';$('pprefix').value='';$('pdays').value='';
+  toast('Promo lancée 🎉');load('promos');
+}
+async function togglePromo(id,active){await POST(`/promos/${id}`,{active:!active},'PUT');load('promos');}
+async function delPromo(id){if(confirm('Supprimer cette promo ?')){await POST(`/promos/${id}`,{},'DELETE');load('promos');}}
 
 /* ---- boot ---- */
 async function boot(){

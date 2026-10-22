@@ -5,6 +5,7 @@ const express = require('express');
 const db = require('../db');
 const { normalizePhone, ah } = require('../util');
 const { requireAuth } = require('../middleware/auth');
+const { bestPromoFor, discounted, activePromos } = require('../services/promos');
 
 const r = express.Router();
 
@@ -26,13 +27,26 @@ r.get('/lookup', requireAuth, ah(async (req, res) => {
   const rate = await findRate(phone);
   if (!rate) return res.status(404).json({ error: 'Destination non couverte' });
 
+  // 🎉 Happy hour éventuelle sur cette destination
+  const promo = await bestPromoFor(phone);
+  const price = discounted(rate.price_per_min_cents, promo);
+
   const w = await db.get('SELECT balance_cents FROM wallets WHERE user_id = ?', [req.user.id]);
-  const maxSec = Math.floor((w.balance_cents * 60) / rate.price_per_min_cents);
+  const maxSec = Math.floor((w.balance_cents * 60) / price);
   res.json({
     destination: rate.destination, flag: rate.flag,
-    price_per_min_cents: rate.price_per_min_cents,
+    price_per_min_cents: price,
+    normal_price_cents: rate.price_per_min_cents,
+    promo: promo ? { title: promo.title, discount_pct: promo.discount_pct } : null,
     max_minutes: Math.floor(maxSec / 60),
   });
+}));
+
+/* Promos actives (bannière de l'app — public) */
+r.get('/promos', ah(async (req, res) => {
+  res.json((await activePromos()).map((p) => ({
+    title: p.title, discount_pct: p.discount_pct, prefix: p.prefix, ends_at: p.ends_at,
+  })));
 }));
 
 /* Grille complète (écran "Tarifs" de l'app) */

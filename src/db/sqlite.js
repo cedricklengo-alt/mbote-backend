@@ -81,7 +81,23 @@ CREATE TABLE IF NOT EXISTS payments (
   created_at   INTEGER NOT NULL,
   updated_at   INTEGER
 );
+CREATE TABLE IF NOT EXISTS promos (
+  id           INTEGER PRIMARY KEY AUTOINCREMENT,
+  title        TEXT NOT NULL,
+  discount_pct INTEGER NOT NULL,
+  prefix       TEXT NOT NULL DEFAULT '',
+  active       INTEGER NOT NULL DEFAULT 1,
+  starts_at    INTEGER NOT NULL DEFAULT 0,
+  ends_at      INTEGER NOT NULL DEFAULT 0
+);
 `;
+
+// Colonnes ajoutées après la V1 (ALTER sans IF NOT EXISTS en SQLite → try/catch)
+const MIGRATIONS = [
+  `ALTER TABLE users ADD COLUMN referral_code TEXT`,
+  `ALTER TABLE users ADD COLUMN referred_by TEXT`,
+  `ALTER TABLE users ADD COLUMN referral_rewarded INTEGER DEFAULT 0`,
+];
 
 let db;
 
@@ -113,6 +129,7 @@ module.exports = {
     db.pragma('journal_mode = WAL');
     db.pragma('foreign_keys = ON');
     db.exec(SCHEMA);
+    for (const m of MIGRATIONS) { try { db.exec(m); } catch { /* colonne déjà présente */ } }
   },
 
   get: (sql, p) => lock(() => raw.get(sql, p)),

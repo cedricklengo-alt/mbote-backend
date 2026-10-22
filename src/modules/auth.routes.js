@@ -6,6 +6,7 @@ const express = require('express');
 const db = require('../db');
 const { uid, now, normalizePhone, ah } = require('../util');
 const { sign, requireAuth } = require('../middleware/auth');
+const referral = require('../services/referral');
 
 const r = express.Router();
 const DEMO = () => String(process.env.DEMO_MODE || 'true') === 'true';
@@ -55,6 +56,9 @@ r.post('/verify-otp', ah(async (req, res) => {
       );
     });
     user = await db.get('SELECT * FROM users WHERE id = ?', [id]);
+    // 🤝 Code parrain (facultatif) : lie le compte ; le bonus 1 $ + 1 $
+    // sera versé au premier appel facturé du filleul (anti-fraude)
+    if (req.body.referral_code) await referral.linkReferral(id, req.body.referral_code);
   }
   if (user.status === 'blocked') return res.status(403).json({ error: 'Compte bloqué — contactez le support' });
 
