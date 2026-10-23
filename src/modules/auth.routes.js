@@ -75,16 +75,28 @@ r.post('/verify-otp', ah(async (req, res) => {
 r.get('/me', requireAuth, ah(async (req, res) => {
   const w = await db.get('SELECT * FROM wallets WHERE user_id = ?', [req.user.id]);
   res.json({
-    user: { id: req.user.id, phone: req.user.phone, name: req.user.name, country: req.user.country },
+    user: {
+      id: req.user.id, phone: req.user.phone, name: req.user.name,
+      country: req.user.country, avatar: req.user.avatar || null,
+    },
     balance_cents: w.balance_cents,
     currency: w.currency,
   });
 }));
 
 r.put('/me', requireAuth, ah(async (req, res) => {
-  const name = String(req.body.name || '').slice(0, 60);
-  await db.run('UPDATE users SET name = ? WHERE id = ?', [name, req.user.id]);
-  res.json({ ok: true, name });
+  if (req.body.name !== undefined) {
+    const name = String(req.body.name || '').slice(0, 60);
+    await db.run('UPDATE users SET name = ? WHERE id = ?', [name, req.user.id]);
+  }
+  // 📷 Photo de profil : data-URI compressée côté app (max ~300 Ko)
+  if (req.body.avatar !== undefined) {
+    const av = String(req.body.avatar || '');
+    if (av && (!av.startsWith('data:image/') || av.length > 400000))
+      return res.status(400).json({ error: 'Photo invalide ou trop lourde' });
+    await db.run('UPDATE users SET avatar = ? WHERE id = ?', [av || null, req.user.id]);
+  }
+  res.json({ ok: true });
 }));
 
 module.exports = r;

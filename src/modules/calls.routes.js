@@ -67,13 +67,16 @@ r.post('/start', requireAuth, ah(async (req, res) => {
 
   const FREE_CAP_SEC = 4 * 3600; // 4 h max par appel gratuit
   let price, maxSec, destination, flag, promo = null, packId = null, freeReason = null;
+  let calleeName = null, calleeAvatar = null;
 
-  // 💚 1. Appel MBOTE → MBOTE : GRATUIT si l'appelé a l'app
+  // 💚 1. Appel MboteCall : GRATUIT si l'appelé a l'app
   const toUser = await db.get(
-    `SELECT id FROM users WHERE phone = ? AND role = 'user' AND status = 'active'`, [to]);
+    `SELECT id, name, avatar FROM users WHERE phone = ? AND role = 'user' AND status = 'active'`, [to]);
   if (toUser && toUser.id !== req.user.id) {
-    price = 0; destination = 'MBOTE → MBOTE'; flag = '💚';
+    price = 0; destination = 'MboteCall'; flag = '💚';
     maxSec = FREE_CAP_SEC; freeReason = 'mbote';
+    calleeName = toUser.name || null;
+    calleeAvatar = toUser.avatar || null; // 📷 la photo de l'appelé s'affiche pendant l'appel
   } else {
     const rate = await findRate(to);
     if (!rate) return res.status(404).json({ error: 'Destination non couverte' });
@@ -107,7 +110,11 @@ r.post('/start', requireAuth, ah(async (req, res) => {
     call_id: id,
     destination, flag,
     price_per_min_cents: price,
+    // 🎙️ L'appelé est-il joignable en voix réelle (app ouverte) ?
+    rtc_online: freeReason === 'mbote' && require('./rtc.ws').isOnline(to),
     free_reason: freeReason, // 'mbote' | 'package' | null
+    callee_name: calleeName,
+    callee_avatar: calleeAvatar,
     promo: promo ? { title: promo.title, discount_pct: promo.discount_pct } : null,
     max_sec: maxSec,
     provider: getProvider().name,

@@ -25,12 +25,12 @@ r.get('/lookup', requireAuth, ah(async (req, res) => {
   const phone = normalizePhone(req.query.phone);
   if (!phone) return res.status(400).json({ error: 'Numéro invalide' });
 
-  // 💚 Appelé déjà sur MBOTE! → GRATUIT
+  // 💚 Appelé déjà sur MboteCall → GRATUIT
   const toUser = await db.get(
     `SELECT id FROM users WHERE phone = ? AND role = 'user' AND status = 'active'`, [phone]);
   if (toUser && toUser.id !== req.user.id) {
     return res.json({
-      destination: 'MBOTE → MBOTE', flag: '💚',
+      destination: 'MboteCall', flag: '💚',
       price_per_min_cents: 0, free_reason: 'mbote', max_minutes: 240,
     });
   }

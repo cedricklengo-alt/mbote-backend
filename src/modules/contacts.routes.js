@@ -25,7 +25,7 @@ r.delete('/:id', requireAuth, ah(async (req, res) => {
   res.json({ ok: true });
 }));
 
-/** 📒 Vérification en lot : lesquels de ces numéros ont un compte MBOTE! ?
+/** 📒 Vérification en lot : lesquels de ces numéros ont un compte MboteCall ?
  *  Body : { phones: ["+243 81 234 56 78", "081 234 5678", …] } (max 500)
  *  Match par les 9 derniers chiffres → tolère les formats locaux (081…)
  *  et internationaux (+24381…).

@@ -1,6 +1,6 @@
 /**
  * ============================================================
- *  MBOTE! — Serveur principal (monolithe modulaire)
+ *  MboteCall — Serveur principal (monolithe modulaire)
  *  Modules : auth · wallet · rating · calls · contacts · admin
  * ============================================================
  */
@@ -10,7 +10,7 @@ const path = require('path');
 const db = require('./db');
 
 const app = express();
-app.use(express.json());
+app.use(express.json({ limit: '500kb' })); // 500 kb : photos de profil compressées
 
 // Journal des requêtes (diagnostic)
 app.use((req, res, next) => {
@@ -36,6 +36,7 @@ app.use('/api/contacts', require('./modules/contacts.routes'));
 app.use('/api/referral', require('./modules/referral.routes'));
 app.use('/api/packages', require('./modules/packages.routes'));
 app.use('/api/airtime', require('./modules/airtime.routes'));
+app.use('/api/i18n', require('./modules/i18n.routes')); // 🗣️ langues téléchargeables (public)
 app.use('/api/payments', require('./modules/payments.routes')); // webhook agrégateur (public)
 app.use('/api/admin', require('./modules/admin.routes'));
 
@@ -57,8 +58,11 @@ app.use((err, req, res, next) => {
 
 const PORT = process.env.PORT || 4000;
 db.init().then(() => {
-  app.listen(PORT, '0.0.0.0', () => {
-    console.log(`✅ MBOTE! backend démarré sur le port ${PORT}`);
+  const http = require('http');
+  const server = http.createServer(app);
+  require('./modules/rtc.ws').init(server); // 🎙️ appels voix temps réel
+  server.listen(PORT, '0.0.0.0', () => {
+    console.log(`✅ MboteCall backend démarré sur le port ${PORT}`);
     console.log(`   Base de données : ${db.name}`);
     console.log(`   Console admin   : http://localhost:${PORT}/admin`);
     console.log(`   Mode démo       : ${String(process.env.DEMO_MODE || 'true')}`);

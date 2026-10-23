@@ -129,6 +129,7 @@ const MIGRATIONS = [
   `ALTER TABLE users ADD COLUMN referred_by TEXT`,
   `ALTER TABLE users ADD COLUMN referral_rewarded INTEGER DEFAULT 0`,
   `ALTER TABLE calls ADD COLUMN user_package_id TEXT`,
+  `ALTER TABLE users ADD COLUMN avatar TEXT`,
 ];
 
 let db;

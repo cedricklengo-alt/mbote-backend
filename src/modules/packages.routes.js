@@ -23,7 +23,7 @@ r.get('/mine', requireAuth, ah(async (req, res) => {
      ORDER BY purchased_at DESC`, [req.user.id, now()]));
 }));
 
-/* Achat (débité du solde MBOTE!) */
+/* Achat (débité du solde MboteCall) */
 r.post('/:id/buy', requireAuth, ah(async (req, res) => {
   const pack = await db.get('SELECT * FROM packages WHERE id = ? AND active = 1', [req.params.id]);
   if (!pack) return res.status(404).json({ error: 'Forfait introuvable' });

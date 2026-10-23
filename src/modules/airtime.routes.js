@@ -1,6 +1,6 @@
 /**
  * Module AIRTIME — offrir du crédit GSM (Vodacom/Orange/Airtel…) à un proche.
- * Débit du portefeuille MBOTE! → envoi via l'agrégateur (démo ⇄ Reloadly).
+ * Débit du portefeuille MboteCall → envoi via l'agrégateur (démo ⇄ Reloadly).
  * En cas d'échec de l'opérateur : REMBOURSEMENT automatique.
  */
 const express = require('express');
