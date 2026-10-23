@@ -71,7 +71,7 @@ r.post('/start', requireAuth, ah(async (req, res) => {
 
   // 💚 1. Appel MboteCall : GRATUIT si l'appelé a l'app
   const toUser = await db.get(
-    `SELECT id, name, avatar FROM users WHERE phone = ? AND role = 'user' AND status = 'active'`, [to]);
+    `SELECT id, name, avatar, fcm_token FROM users WHERE phone = ? AND role = 'user' AND status = 'active'`, [to]);
   if (toUser && toUser.id !== req.user.id) {
     price = 0; destination = 'MboteCall'; flag = '💚';
     maxSec = FREE_CAP_SEC; freeReason = 'mbote';
@@ -110,8 +110,12 @@ r.post('/start', requireAuth, ah(async (req, res) => {
     call_id: id,
     destination, flag,
     price_per_min_cents: price,
-    // 🎙️ L'appelé est-il joignable en voix réelle (app ouverte) ?
-    rtc_online: freeReason === 'mbote' && require('./rtc.ws').isOnline(to),
+    // 🎙️ L'appelé est-il joignable en voix réelle ?
+    // Oui si son app est ouverte… OU si on peut la réveiller par notification 🔔
+    rtc_online: freeReason === 'mbote' && (
+      require('./rtc.ws').isOnline(to) ||
+      (require('../services/push').enabled() && !!(toUser && toUser.fcm_token))
+    ),
     free_reason: freeReason, // 'mbote' | 'package' | null
     callee_name: calleeName,
     callee_avatar: calleeAvatar,

@@ -99,4 +99,14 @@ r.put('/me', requireAuth, ah(async (req, res) => {
   res.json({ ok: true });
 }));
 
+/* 🔔 Jeton de notification Firebase (appels app fermée)
+ * L'app l'envoie après connexion ; le serveur s'en sert pour réveiller
+ * ce téléphone quand quelqu'un l'appelle et que l'app est fermée. */
+r.post('/fcm-token', requireAuth, ah(async (req, res) => {
+  const token = String(req.body.token || '').slice(0, 4096);
+  await db.run('UPDATE users SET fcm_token = ? WHERE id = ?',
+    [token || null, req.user.id]);
+  res.json({ ok: true });
+}));
+
 module.exports = r;

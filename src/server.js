@@ -60,6 +60,7 @@ const PORT = process.env.PORT || 4000;
 db.init().then(() => {
   const http = require('http');
   const server = http.createServer(app);
+  require('./services/push').init(); // 🔔 notifications d'appel (Firebase)
   require('./modules/rtc.ws').init(server); // 🎙️ appels voix temps réel
   server.listen(PORT, '0.0.0.0', () => {
     console.log(`✅ MboteCall backend démarré sur le port ${PORT}`);
