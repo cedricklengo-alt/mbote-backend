@@ -51,6 +51,7 @@ function init(server) {
     const prev = online.get(user.phone);
     if (prev && prev.ws !== ws) { try { prev.ws.close(); } catch (_) {} }
     online.set(user.phone, { ws, user });
+    console.log(`🔌 WS connecté : ${user.phone} (${online.size} en ligne)`);
     ws._phone = user.phone;
     ws._alive = true;
     ws.on('pong', () => { ws._alive = true; });
@@ -59,10 +60,11 @@ function init(server) {
       let msg;
       try { msg = JSON.parse(raw.toString()); } catch (_) { return; }
       const type = String(msg.type || '');
-      if (!['offer', 'answer', 'ice', 'reject', 'hangup'].includes(type)) return;
+      if (!['offer', 'answer', 'ice', 'reject', 'hangup', 'ringing'].includes(type)) return;
 
       const to = normalizePhone(msg.to);
       const dest = to && online.get(to);
+      if (type !== 'ice') console.log(`📨 WS ${type} : ${user.phone} → ${to} ${dest ? '✓' : '✗ hors ligne'}`);
       if (!dest) {
         // Destinataire hors ligne → on prévient l'appelant
         if (type === 'offer') {
@@ -89,7 +91,10 @@ function init(server) {
 
     ws.on('close', () => {
       const cur = online.get(ws._phone);
-      if (cur && cur.ws === ws) online.delete(ws._phone);
+      if (cur && cur.ws === ws) {
+        online.delete(ws._phone);
+        console.log(`🔌 WS déconnecté : ${ws._phone} (${online.size} en ligne)`);
+      }
     });
   });
 

@@ -158,13 +158,29 @@ r.post('/:id/hangup', requireAuth, ah(async (req, res) => {
 /* ---------- 4) Historique ---------- */
 r.get('/history', requireAuth, ah(async (req, res) => {
   const rows = await db.all(
-    `SELECT id, callee, destination, status, started_at, billed_sec, cost_cents, hangup_cause
+    `SELECT id, callee, destination, status, started_at, billed_sec, cost_cents, hangup_cause, direction
      FROM calls WHERE user_id = ? ORDER BY started_at DESC LIMIT 100`, [req.user.id]);
   const monthStart = new Date(new Date().getFullYear(), new Date().getMonth(), 1).getTime();
   const month = await db.get(
     `SELECT COALESCE(SUM(billed_sec),0) s, COALESCE(SUM(cost_cents),0) c
      FROM calls WHERE user_id = ? AND started_at >= ?`, [req.user.id, monthStart]);
   res.json({ calls: rows, month_sec: Number(month.s), month_cost_cents: Number(month.c) });
+}));
+
+/* ---------- 4bis) 📥 Journal d'un appel MboteCall REÇU (vraie voix) ----------
+   Appelé par l'app du destinataire à la fin d'un appel entrant :
+   répondu (billed_sec > 0) ou manqué/refusé (billed_sec = 0). */
+r.post('/log-incoming', requireAuth, ah(async (req, res) => {
+  const from = normalizePhone(req.body.from);
+  if (!from) return res.status(400).json({ error: 'Numéro invalide' });
+  const billed = Math.max(0, Math.min(86400, parseInt(req.body.billed_sec, 10) || 0));
+  await db.run(
+    `INSERT INTO calls(id,user_id,callee,destination,price_per_min_cents,max_sec,status,started_at,ended_at,billed_sec,cost_cents,hangup_cause,direction)
+     VALUES(?,?,?,?,0,0,'ended',?,?,?,0,?,'in')`,
+    [uid('ca'), req.user.id, from, 'MboteCall',
+     now() - billed * 1000, now(), billed,
+     billed > 0 ? 'remote_hangup' : 'missed']);
+  res.json({ ok: true });
 }));
 
 /* ---------- 5) Jeton SDK voix (Twilio) pour l'app ---------- */

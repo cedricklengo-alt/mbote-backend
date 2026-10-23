@@ -89,6 +89,7 @@ const PACKS = {
       downloading: 'Downloading…',
       downloaded: 'Language installed ✓',
       history_all: 'All',
+      history_in: 'Incoming',
       history_out: 'Outgoing',
       history_missed: 'Missed',
       history_empty: 'No call in this category',

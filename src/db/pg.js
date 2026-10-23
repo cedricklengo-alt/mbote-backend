@@ -129,6 +129,7 @@ ALTER TABLE users ADD COLUMN IF NOT EXISTS referred_by TEXT;
 ALTER TABLE users ADD COLUMN IF NOT EXISTS referral_rewarded INTEGER DEFAULT 0;
 ALTER TABLE calls ADD COLUMN IF NOT EXISTS user_package_id TEXT;
 ALTER TABLE users ADD COLUMN IF NOT EXISTS avatar TEXT;
+ALTER TABLE calls ADD COLUMN IF NOT EXISTS direction TEXT DEFAULT 'out';
 `;
 
 // Convertit les placeholders « ? » (style SQLite) en « $1, $2… » (style PG)
