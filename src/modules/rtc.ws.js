@@ -86,6 +86,8 @@ function init(server) {
     }
 
     ws.on('message', (raw) => {
+      // 🛡️ Garde-fou : message anormalement gros → ignoré (anti-abus)
+      if (raw.length > 200_000) return;
       let msg;
       try { msg = JSON.parse(raw.toString()); } catch (_) { return; }
       const type = String(msg.type || '');

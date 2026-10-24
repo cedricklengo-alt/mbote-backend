@@ -6,13 +6,27 @@ const express = require('express');
 const db = require('../db');
 const { uid, now, normalizePhone, ah } = require('../util');
 const { sign, requireAuth } = require('../middleware/auth');
+const { rateLimit } = require('../middleware/ratelimit');
 const referral = require('../services/referral');
 
 const r = express.Router();
 const DEMO = () => String(process.env.DEMO_MODE || 'true') === 'true';
 
+/* 🛡️ Anti-abus : un même numéro ne peut pas demander un code en boucle,
+ * ni essayer des codes en rafale (force brute). */
+const limitOtpAsk = rateLimit({
+  windowMs: 10 * 60_000, max: 4,
+  key: (req) => 'otp-ask:' + (normalizePhone(req.body.phone) || req.ip),
+  message: 'Trop de demandes de code — patiente 10 minutes puis réessaie',
+});
+const limitOtpTry = rateLimit({
+  windowMs: 10 * 60_000, max: 8,
+  key: (req) => 'otp-try:' + (normalizePhone(req.body.phone) || req.ip),
+  message: 'Trop d\'essais — patiente 10 minutes puis réessaie',
+});
+
 /* 1) Demander un code OTP */
-r.post('/request-otp', ah(async (req, res) => {
+r.post('/request-otp', limitOtpAsk, ah(async (req, res) => {
   const phone = normalizePhone(req.body.phone);
   if (!phone) return res.status(400).json({ error: 'Numéro invalide (format +243…)' });
 
@@ -31,7 +45,7 @@ r.post('/request-otp', ah(async (req, res) => {
 }));
 
 /* 2) Vérifier le code → compte créé si nouveau → JWT */
-r.post('/verify-otp', ah(async (req, res) => {
+r.post('/verify-otp', limitOtpTry, ah(async (req, res) => {
   const phone = normalizePhone(req.body.phone);
   const code = String(req.body.code || '');
   const row = await db.get('SELECT * FROM otps WHERE phone = ?', [phone]);

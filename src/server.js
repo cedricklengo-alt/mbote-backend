@@ -12,6 +12,20 @@ const db = require('./db');
 const app = express();
 app.use(express.json({ limit: '500kb' })); // 500 kb : photos de profil compressées
 
+/* 🛡️ Sécurité — en-têtes de protection navigateur + limite globale anti-inondation */
+const { rateLimit } = require('./middleware/ratelimit');
+app.disable('x-powered-by'); // ne pas révéler la technologie du serveur
+app.use((req, res, next) => {
+  res.set({
+    'X-Content-Type-Options': 'nosniff',
+    'X-Frame-Options': 'DENY',
+    'Referrer-Policy': 'no-referrer',
+    'Strict-Transport-Security': 'max-age=31536000; includeSubDomains',
+  });
+  next();
+});
+app.use(rateLimit({ windowMs: 60_000, max: 300 })); // 300 req/min par adresse
+
 // Journal des requêtes (diagnostic)
 app.use((req, res, next) => {
   console.log(`➡️  ${req.method} ${req.url}`);
