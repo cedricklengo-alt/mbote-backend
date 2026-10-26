@@ -8,6 +8,7 @@ const { uid, now, normalizePhone, ah } = require('../util');
 const { sign, requireAuth } = require('../middleware/auth');
 const { rateLimit } = require('../middleware/ratelimit');
 const referral = require('../services/referral');
+const sms = require('../services/sms');
 
 const r = express.Router();
 const DEMO = () => String(process.env.DEMO_MODE || 'true') === 'true';
@@ -36,12 +37,29 @@ r.post('/request-otp', limitOtpAsk, ah(async (req, res) => {
     [phone, code, now() + 5 * 60_000, code, now() + 5 * 60_000]
   );
 
+  // 📲 SMS RÉEL via Africa's Talking dès que les clés AT_* sont présentes
+  if (sms.enabled()) {
+    const envoi = await sms.sendSms(
+      phone,
+      `MboteCall: ton code est ${code}. Valable 5 min. Ne le partage jamais.`
+    );
+    if (DEMO()) {
+      // En démo on garde aussi le code dans la réponse (numéros de test sans vraie SIM)
+      console.log(`📲 [DEMO] OTP pour ${phone} : ${code} (SMS réel : ${envoi.ok ? 'envoyé ✅' : 'échec ❌'})`);
+      return res.json({ sent: true, demo_code: code });
+    }
+    if (!envoi.ok) {
+      return res.status(502).json({ error: 'SMS non envoyé — vérifie le numéro et réessaie dans un instant' });
+    }
+    return res.json({ sent: true });
+  }
+
   if (DEMO()) {
     console.log(`📲 [DEMO] OTP pour ${phone} : ${code}`);
     return res.json({ sent: true, demo_code: code });
   }
-  // PRODUCTION : envoyer le SMS ici, ne JAMAIS renvoyer le code
-  return res.json({ sent: true });
+  // PRODUCTION sans canal SMS configuré : on refuse clairement.
+  return res.status(503).json({ error: 'Envoi SMS non configuré sur le serveur (variables AT_USERNAME / AT_API_KEY)' });
 }));
 
 /* 2) Vérifier le code → compte créé si nouveau → JWT */
@@ -154,9 +172,21 @@ r.post('/pin-reset/request', requireAuth, limitPinReset, ah(async (req, res) => 
   await db.run(
     'INSERT INTO otps(phone, code, expires_at) VALUES(?,?,?) ON CONFLICT(phone) DO UPDATE SET code=?, expires_at=?',
     ['pin:' + req.user.phone, code, now() + 5 * 60_000, code, now() + 5 * 60_000]);
-  // ⚠️ SÉCURITÉ : jamais dans la réponse — journaux serveur uniquement.
-  // PRODUCTION : envoyer ce code par SMS ici.
-  console.log(`🔐 [SÉCURITÉ] Code réinitialisation PIN pour ${req.user.phone} : ${code} (5 min, 3 essais)`);
+  // ⚠️ SÉCURITÉ : le code n'apparaît JAMAIS dans la réponse API.
+  // 📲 SMS réel via Africa's Talking si configuré.
+  if (sms.enabled()) {
+    const envoi = await sms.sendSms(
+      req.user.phone,
+      `MboteCall: code de reinitialisation PIN ${code}. Valable 5 min. Si ce n'est pas toi, ignore ce message.`
+    );
+    if (!DEMO() && !envoi.ok) {
+      return res.status(502).json({ error: 'SMS non envoyé — réessaie dans un instant' });
+    }
+  }
+  if (DEMO() || !sms.enabled()) {
+    // Visible uniquement dans les journaux serveur (jamais en prod avec SMS actifs)
+    console.log(`🔐 [SÉCURITÉ] Code réinitialisation PIN pour ${req.user.phone} : ${code} (5 min, 3 essais)`);
+  }
   res.json({ sent: true });
 }));
 
