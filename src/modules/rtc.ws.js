@@ -16,11 +16,9 @@
  */
 
 const WebSocket = require('ws');
-const jwt = require('jsonwebtoken');
 const db = require('../db');
 const { normalizePhone } = require('../util');
-
-const SECRET = process.env.JWT_SECRET || 'dev-secret';
+const { verifyToken } = require('../middleware/auth'); // 🔄 double clé (rotation)
 const push = require('../services/push');
 
 /** téléphone (normalisé) → { ws, user } */
@@ -50,7 +48,8 @@ function init(server) {
     let user;
     try {
       const url = new URL(req.url, 'http://x');
-      const payload = jwt.verify(url.searchParams.get('token') || '', SECRET);
+      const payload = verifyToken(url.searchParams.get('token') || '');
+      if (!payload) throw new Error('jeton invalide');
       user = await db.get(
         'SELECT id, phone, name, avatar FROM users WHERE id = ?',
         [payload.uid]
