@@ -66,6 +66,20 @@ CREATE TABLE IF NOT EXISTS otps (
   code       TEXT NOT NULL,
   expires_at INTEGER NOT NULL
 );
+CREATE TABLE IF NOT EXISTS voice_notes (
+  id           TEXT PRIMARY KEY,
+  from_id      TEXT NOT NULL REFERENCES users(id),
+  to_id        TEXT NOT NULL REFERENCES users(id),
+  audio        TEXT NOT NULL,
+  duration_sec INTEGER NOT NULL DEFAULT 0,
+  lang_from    TEXT NOT NULL DEFAULT 'fr',
+  lang_to      TEXT NOT NULL DEFAULT 'ln',
+  transcript   TEXT,
+  translation  TEXT,
+  status       TEXT NOT NULL DEFAULT 'pending',
+  created_at   INTEGER NOT NULL,
+  read_at      INTEGER
+);
 CREATE TABLE IF NOT EXISTS payments (
   id           TEXT PRIMARY KEY,
   user_id      TEXT NOT NULL REFERENCES users(id),

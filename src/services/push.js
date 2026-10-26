@@ -80,4 +80,26 @@ async function sendCallPush(token, fromName, fromPhone) {
   }
 }
 
-module.exports = { init, enabled, sendCallPush };
+/**
+ * ℹ️ Notification d'information (ex. alerte sécurité « PIN réinitialisé »)
+ */
+async function sendInfoPush(token, title, body) {
+  if (fake) {
+    console.log(`🧪 [SIMULATION] push info « ${title} »`);
+    return true;
+  }
+  if (!messaging || !token) return false;
+  try {
+    await messaging.send({
+      token,
+      android: { priority: 'high' },
+      notification: { title, body },
+    });
+    return true;
+  } catch (e) {
+    console.error('⚠️ Envoi push info KO :', e.message);
+    return false;
+  }
+}
+
+module.exports = { init, enabled, sendCallPush, sendInfoPush };

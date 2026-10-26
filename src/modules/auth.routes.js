@@ -123,4 +123,81 @@ r.post('/fcm-token', requireAuth, ah(async (req, res) => {
   res.json({ ok: true });
 }));
 
+/* ============================================================
+ * 🔐 RÉINITIALISATION DU CODE PIN — protocole de sécurité strict
+ * ============================================================
+ * Seule la PERSONNE HABILITÉE peut réinitialiser :
+ *   1. être connecté sur l'appareil (jeton du compte exigé), ET
+ *   2. recevoir un code SMS dédié sur le numéro du compte (la SIM) ;
+ *   3. code valable 5 minutes, usage unique, 3 essais maximum ;
+ *   4. après 3 codes faux → réinitialisation BLOQUÉE 30 minutes ;
+ *   5. le code n'est JAMAIS renvoyé dans la réponse de l'API
+ *      (même en mode démo : il n'apparaît que dans les journaux) ;
+ *   6. chaque étape est journalisée, et le titulaire est averti par
+ *      notification quand son PIN a été réinitialisé.
+ */
+const pinTries = new Map(); // phone → { n, lockUntil }
+
+const limitPinReset = rateLimit({
+  windowMs: 10 * 60_000, max: 3,
+  key: (req) => 'pin-reset:' + (req.user ? req.user.phone : req.ip),
+  message: 'Trop de demandes — patiente 10 minutes puis réessaie',
+});
+
+r.post('/pin-reset/request', requireAuth, limitPinReset, ah(async (req, res) => {
+  const lock = pinTries.get(req.user.phone);
+  if (lock && lock.lockUntil > now()) {
+    return res.status(429).json({
+      error: 'Réinitialisation bloquée après 3 codes faux — réessaie dans 30 minutes' });
+  }
+  const code = String(Math.floor(100000 + Math.random() * 900000));
+  await db.run(
+    'INSERT INTO otps(phone, code, expires_at) VALUES(?,?,?) ON CONFLICT(phone) DO UPDATE SET code=?, expires_at=?',
+    ['pin:' + req.user.phone, code, now() + 5 * 60_000, code, now() + 5 * 60_000]);
+  // ⚠️ SÉCURITÉ : jamais dans la réponse — journaux serveur uniquement.
+  // PRODUCTION : envoyer ce code par SMS ici.
+  console.log(`🔐 [SÉCURITÉ] Code réinitialisation PIN pour ${req.user.phone} : ${code} (5 min, 3 essais)`);
+  res.json({ sent: true });
+}));
+
+r.post('/pin-reset/verify', requireAuth, ah(async (req, res) => {
+  const phone = req.user.phone;
+  const t = pinTries.get(phone) || { n: 0, lockUntil: 0 };
+  if (t.lockUntil > now()) {
+    return res.status(429).json({
+      error: 'Réinitialisation bloquée — réessaie dans 30 minutes' });
+  }
+  const row = await db.get('SELECT * FROM otps WHERE phone = ?', ['pin:' + phone]);
+  const code = String(req.body.code || '');
+  if (!row || row.expires_at < now()) {
+    return res.status(401).json({ error: 'Code expiré — redemande un code' });
+  }
+  if (row.code !== code) {
+    t.n++;
+    if (t.n >= 3) {
+      t.n = 0;
+      t.lockUntil = now() + 30 * 60_000;
+      pinTries.set(phone, t);
+      await db.run('DELETE FROM otps WHERE phone = ?', ['pin:' + phone]);
+      console.log(`🔐 [SÉCURITÉ] 3 codes faux — réinitialisation PIN bloquée 30 min pour ${phone}`);
+      return res.status(429).json({ error: '3 codes faux — réinitialisation bloquée 30 minutes' });
+    }
+    pinTries.set(phone, t);
+    console.log(`🔐 [SÉCURITÉ] Code PIN faux pour ${phone} (essai ${t.n}/3)`);
+    return res.status(401).json({ error: `Code incorrect — il reste ${3 - t.n} essai(s)` });
+  }
+  // ✅ Personne habilitée confirmée : usage unique + journal + alerte
+  await db.run('DELETE FROM otps WHERE phone = ?', ['pin:' + phone]);
+  pinTries.delete(phone);
+  console.log(`🔐 [SÉCURITÉ] PIN réinitialisé pour ${phone} — ${new Date().toISOString()}`);
+  try {
+    const push = require('../services/push');
+    if (push.enabled() && req.user.fcm_token) {
+      push.sendInfoPush(req.user.fcm_token, '🔐 Code PIN réinitialisé',
+        'Le verrou de ton app MboteCall vient d\'être réinitialisé. Si ce n\'est pas toi, contacte le support.');
+    }
+  } catch (_) {}
+  res.json({ ok: true });
+}));
+
 module.exports = r;
