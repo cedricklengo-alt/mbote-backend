@@ -83,6 +83,18 @@ CREATE TABLE IF NOT EXISTS voice_notes (
   created_at   BIGINT NOT NULL,
   read_at      BIGINT
 );
+CREATE TABLE IF NOT EXISTS text_messages (
+  id           TEXT PRIMARY KEY,
+  from_id      TEXT NOT NULL REFERENCES users(id),
+  to_id        TEXT NOT NULL REFERENCES users(id),
+  body         TEXT NOT NULL,
+  lang_from    TEXT NOT NULL DEFAULT 'fr',
+  lang_to      TEXT NOT NULL DEFAULT 'ln',
+  translation  TEXT,
+  status       TEXT NOT NULL DEFAULT 'pending',
+  created_at   BIGINT NOT NULL,
+  read_at      BIGINT
+);
 CREATE TABLE IF NOT EXISTS payments (
   id           TEXT PRIMARY KEY,
   user_id      TEXT NOT NULL REFERENCES users(id),

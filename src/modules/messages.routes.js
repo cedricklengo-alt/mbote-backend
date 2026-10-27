@@ -1,0 +1,159 @@
+/**
+ * 💬 v2.0 MESSAGES — « Chacun écrit dans sa langue, chacun lit dans la sienne »
+ *
+ *   POST /api/messages/send             { to, text, lang_from, lang_to }
+ *   GET  /api/messages/threads          → fils UNIFIÉS (textes + notes Lokota)
+ *   GET  /api/messages/with/:phone      → conversation complète avec un proche
+ *   POST /api/messages/with/:phone/read → marque textes ET notes comme lus
+ *
+ * Garde-fous : destinataire MboteCall uniquement, texte ≤ 1000 caractères,
+ * langues fr/ln/sw, 120 messages max par heure.
+ * Si lang_from == lang_to : pas d'appel IA (statut 'done' direct).
+ */
+
+const express = require('express');
+const db = require('../db');
+const { uid, now, normalizePhone, ah } = require('../util');
+const { requireAuth } = require('../middleware/auth');
+const { rateLimit } = require('../middleware/ratelimit');
+const lokota = require('../services/lokota');
+
+const r = express.Router();
+const OK_LANGS = ['fr', 'ln', 'sw'];
+
+const limitSend = rateLimit({
+  windowMs: 60 * 60_000, max: 120,
+  key: (req) => 'msg:' + (req.user ? req.user.id : req.ip),
+  message: 'Beaucoup de messages d\'un coup 😅 — réessaie dans une heure',
+});
+
+/* 📤 Envoyer un message écrit */
+r.post('/send', requireAuth, limitSend, ah(async (req, res) => {
+  const to = normalizePhone(req.body.to);
+  if (!to) return res.status(400).json({ error: 'Numéro invalide (format +243…)' });
+
+  const toUser = await db.get(
+    `SELECT id, name, fcm_token FROM users WHERE phone = ? AND role = 'user' AND status = 'active'`, [to]);
+  if (!toUser) return res.status(404).json({ error: 'Ce numéro n\'a pas encore MboteCall — invite-le 💚' });
+  if (toUser.id === req.user.id) return res.status(400).json({ error: 'Tu ne peux pas t\'écrire à toi-même 😄' });
+
+  const text = String(req.body.text || '').trim();
+  if (!text) return res.status(400).json({ error: 'Message vide' });
+  if (text.length > 1000) return res.status(400).json({ error: 'Message trop long (1000 caractères max)' });
+
+  const lf = OK_LANGS.includes(req.body.lang_from) ? req.body.lang_from : 'fr';
+  const lt = OK_LANGS.includes(req.body.lang_to) ? req.body.lang_to : 'ln';
+  const sameLang = lf === lt;
+
+  const id = uid('tm');
+  await db.run(
+    `INSERT INTO text_messages(id, from_id, to_id, body, lang_from, lang_to, status, created_at)
+     VALUES(?,?,?,?,?,?,?,?)`,
+    [id, req.user.id, toUser.id, text, lf, lt, sameLang ? 'done' : 'pending', now()]);
+
+  // 🧠 Traduction en tâche de fond (seulement si les langues diffèrent)
+  if (!sameLang) setImmediate(() => lokota.processMessage(id).catch(() => {}));
+
+  // 🔔 Prévenir le destinataire (app fermée comprise)
+  try {
+    const push = require('../services/push');
+    if (push.enabled() && toUser.fcm_token) {
+      const preview = text.length > 60 ? text.slice(0, 57) + '…' : text;
+      push.sendInfoPush(toUser.fcm_token, `💬 ${req.user.name || req.user.phone}`, preview);
+    }
+  } catch (_) {}
+
+  console.log(`💬 [MESSAGES] ${id} : ${req.user.phone} → ${to} (${lf} → ${lt}, ${text.length} car.)`);
+  res.json({ id, status: sameLang ? 'done' : 'pending', lokota_mode: lokota.mode() });
+}));
+
+/* 📚 Fils de discussion UNIFIÉS (dernier échange par proche, texte ou note) */
+r.get('/threads', requireAuth, ah(async (req, res) => {
+  const me = req.user.id;
+  const notes = await db.all(
+    `SELECT vn.id, vn.from_id, vn.duration_sec, vn.created_at, vn.read_at,
+            uf.phone AS from_phone, uf.name AS from_name,
+            ut.phone AS to_phone,   ut.name AS to_name
+     FROM voice_notes vn
+     JOIN users uf ON uf.id = vn.from_id
+     JOIN users ut ON ut.id = vn.to_id
+     WHERE vn.from_id = ? OR vn.to_id = ?
+     ORDER BY vn.created_at DESC LIMIT 200`, [me, me]);
+  const texts = await db.all(
+    `SELECT tm.id, tm.from_id, tm.body, tm.created_at, tm.read_at,
+            uf.phone AS from_phone, uf.name AS from_name,
+            ut.phone AS to_phone,   ut.name AS to_name
+     FROM text_messages tm
+     JOIN users uf ON uf.id = tm.from_id
+     JOIN users ut ON ut.id = tm.to_id
+     WHERE tm.from_id = ? OR tm.to_id = ?
+     ORDER BY tm.created_at DESC LIMIT 200`, [me, me]);
+
+  const items = [
+    ...notes.map((n) => ({ ...n, kind: 'note' })),
+    ...texts.map((t) => ({ ...t, kind: 'text' })),
+  ].sort((a, b) => b.created_at - a.created_at);
+
+  const threads = new Map();
+  for (const it of items) {
+    const mine = it.from_id === me;
+    const peerPhone = mine ? it.to_phone : it.from_phone;
+    const peerName = mine ? it.to_name : it.from_name;
+    let t = threads.get(peerPhone);
+    if (!t) {
+      const preview = it.kind === 'text'
+        ? (it.body.length > 44 ? it.body.slice(0, 41) + '…' : it.body)
+        : `🎙️ ${it.duration_sec}s`;
+      t = { peer_phone: peerPhone, peer_name: peerName || '',
+            last_at: it.created_at, last_kind: it.kind,
+            last_mine: mine, last_preview: preview, unread: 0 };
+      threads.set(peerPhone, t);
+    }
+    if (!mine && !it.read_at) t.unread++;
+  }
+  res.json([...threads.values()]);
+}));
+
+/* 💬 Conversation complète avec un proche (textes + notes, triés) */
+r.get('/with/:phone', requireAuth, ah(async (req, res) => {
+  const phone = normalizePhone(req.params.phone);
+  const peer = await db.get(`SELECT id, name FROM users WHERE phone = ?`, [phone]);
+  if (!peer) return res.status(404).json({ error: 'Inconnu' });
+  const me = req.user.id;
+
+  const notes = await db.all(
+    `SELECT id, from_id, audio, duration_sec, lang_from, lang_to,
+            transcript, translation, status, created_at, read_at
+     FROM voice_notes
+     WHERE (from_id = ? AND to_id = ?) OR (from_id = ? AND to_id = ?)
+     ORDER BY created_at ASC LIMIT 100`, [me, peer.id, peer.id, me]);
+  const texts = await db.all(
+    `SELECT id, from_id, body, lang_from, lang_to, translation, status, created_at, read_at
+     FROM text_messages
+     WHERE (from_id = ? AND to_id = ?) OR (from_id = ? AND to_id = ?)
+     ORDER BY created_at ASC LIMIT 200`, [me, peer.id, peer.id, me]);
+
+  const items = [
+    ...notes.map((n) => ({ ...n, kind: 'note', mine: n.from_id === me })),
+    ...texts.map((t) => ({ ...t, kind: 'text', mine: t.from_id === me })),
+  ].sort((a, b) => a.created_at - b.created_at);
+
+  res.json({ peer_name: peer.name || '', items });
+}));
+
+/* ✓✓ Marquer comme lus (textes ET notes) */
+r.post('/with/:phone/read', requireAuth, ah(async (req, res) => {
+  const phone = normalizePhone(req.params.phone);
+  const peer = await db.get(`SELECT id FROM users WHERE phone = ?`, [phone]);
+  if (!peer) return res.status(404).json({ error: 'Inconnu' });
+  const t = now();
+  await db.run(
+    `UPDATE text_messages SET read_at = ? WHERE to_id = ? AND from_id = ? AND read_at IS NULL`,
+    [t, req.user.id, peer.id]);
+  await db.run(
+    `UPDATE voice_notes SET read_at = ? WHERE to_id = ? AND from_id = ? AND read_at IS NULL`,
+    [t, req.user.id, peer.id]);
+  res.json({ ok: true });
+}));
+
+module.exports = r;

@@ -1,5 +1,15 @@
 # 🗣️ GUIDE — Activer les VRAIES traductions Lokota GRATUITEMENT
 
+> ### ⚠️ MISE À JOUR du 27 octobre 2026
+> - Le modèle NVIDIA `meta/llama-3.3-70b-instruct` est **MORT** (retiré le 26/08/2026 → HTTP 410).
+> - Chez Groq, `llama-3.3-70b-versatile` est passé en offre Enterprise.
+> - **Nouvelle recette recommandée — TOUT chez Groq, 1 seule clé :**
+>   `LOKOTA_API_KEY` = gsk_… · `LOKOTA_STT_URL` = https://api.groq.com/openai/v1/audio/transcriptions ·
+>   `LOKOTA_STT_MODEL` = whisper-large-v3 · `LOKOTA_LLM_URL` = https://api.groq.com/openai/v1/chat/completions ·
+>   `LOKOTA_LLM_MODEL` = openai/gpt-oss-120b · (supprimer `LOKOTA_LLM_KEY` si posée)
+
+
+
 Lokota a besoin de deux services IA :
 1. **Transcription** (audio → texte) : modèle Whisper
 2. **Traduction** (texte → texte) : un modèle de langage

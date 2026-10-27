@@ -52,6 +52,7 @@ app.use('/api/packages', require('./modules/packages.routes'));
 app.use('/api/airtime', require('./modules/airtime.routes'));
 app.use('/api/i18n', require('./modules/i18n.routes')); // 🗣️ langues téléchargeables (public)
 app.use('/api/lokota', require('./modules/lokota.routes')); // 🗣️ notes vocales traduites (LOKOTA 1)
+app.use('/api/messages', require('./modules/messages.routes')); // 💬 v2.0 messagerie traduite
 app.use('/api/rtc', require('./modules/rtc.routes')); // 📡 config ICE (TURN côté serveur — Phase A)
 app.use('/api/payments', require('./modules/payments.routes')); // webhook agrégateur (public)
 app.use('/api/admin', require('./modules/admin.routes'));

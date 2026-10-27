@@ -125,7 +125,7 @@ async function processNote(id) {
         temperature: 0.2,
         messages: [
           { role: 'system', content:
-            `Tu es un traducteur familial chaleureux. Traduis fidèlement du ${LANGS[note.lang_from] || note.lang_from} vers le ${LANGS[note.lang_to] || note.lang_to}. Garde le ton affectueux et naturel. Réponds UNIQUEMENT avec la traduction.` },
+            `Tu es un traducteur familial chaleureux. Le texte provient d'une reconnaissance vocale automatique qui fait souvent des erreurs phonétiques, surtout en lingala et swahili : reconstruis d'abord mentalement la phrase la plus probable d'après le contexte, puis traduis fidèlement du ${LANGS[note.lang_from] || note.lang_from} vers le ${LANGS[note.lang_to] || note.lang_to}. Garde le ton affectueux et naturel d'un message familial. Réponds UNIQUEMENT avec la traduction, sans commentaire.` },
           { role: 'user', content: transcript },
         ],
       }),
@@ -143,4 +143,54 @@ async function processNote(id) {
   }
 }
 
-module.exports = { processNote, mode, LANGS };
+/**
+ * 💬 v2.0 MESSAGES — Traduit un message ÉCRIT (même IA que Lokota,
+ * sans l'étape Whisper : plus simple, plus fiable, quasi gratuit).
+ */
+async function processMessage(id) {
+  const msg = await db.get('SELECT * FROM text_messages WHERE id = ?', [id]);
+  if (!msg || msg.status !== 'pending') return;
+  const m = mode();
+
+  if (m === 'off') {
+    await db.run(`UPDATE text_messages SET status = 'no_ai' WHERE id = ?`, [id]);
+    return;
+  }
+
+  if (m === 'demo') {
+    await new Promise((r) => setTimeout(r, 1200));
+    await db.run(
+      `UPDATE text_messages SET translation = ?, status = 'done' WHERE id = ?`,
+      [`🧪 (démo) Traduction simulée en ${LANGS[msg.lang_to] || msg.lang_to} — la vraie IA s'active avec une clé (voir guide).`, id]);
+    console.log(`💬 [MESSAGES] ${id} traduit (simulation)`);
+    return;
+  }
+
+  try {
+    const c = CFG();
+    const cc = await fetchPatient(() => fetch(c.llmUrl, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${c.llmKey}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: c.llmModel,
+        temperature: 0.2,
+        messages: [
+          { role: 'system', content:
+            `Tu es un traducteur familial chaleureux. Traduis fidèlement ce message écrit du ${LANGS[msg.lang_from] || msg.lang_from} vers le ${LANGS[msg.lang_to] || msg.lang_to}. Garde le ton affectueux et naturel d'un message familial, y compris les emojis. Réponds UNIQUEMENT avec la traduction, sans commentaire.` },
+          { role: 'user', content: msg.body },
+        ],
+      }),
+    }), 'traduction message');
+    if (!cc.ok) throw new Error(`traduction HTTP ${cc.status}`);
+    const translation = (await cc.json()).choices?.[0]?.message?.content?.trim() || '';
+    await db.run(
+      `UPDATE text_messages SET translation = ?, status = 'done' WHERE id = ?`,
+      [translation, id]);
+    console.log(`💬 [MESSAGES] ${id} traduit (${msg.lang_from} → ${msg.lang_to})`);
+  } catch (e) {
+    console.error(`⚠️ [MESSAGES] Échec traduction ${id} :`, e.message);
+    await db.run(`UPDATE text_messages SET status = 'failed' WHERE id = ?`, [id]);
+  }
+}
+
+module.exports = { processNote, processMessage, mode, LANGS };
