@@ -162,6 +162,8 @@ const MIGRATIONS = [
   `ALTER TABLE text_messages ADD COLUMN attachment_type TEXT`,
   `ALTER TABLE text_messages ADD COLUMN deleted INTEGER DEFAULT 0`,
   `ALTER TABLE voice_notes ADD COLUMN deleted INTEGER DEFAULT 0`,
+  `ALTER TABLE text_messages ADD COLUMN delivered_at INTEGER`,
+  `ALTER TABLE voice_notes ADD COLUMN delivered_at INTEGER`,
 ];
 
 let db;

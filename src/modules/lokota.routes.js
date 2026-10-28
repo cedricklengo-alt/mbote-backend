@@ -60,8 +60,12 @@ r.post('/send', requireAuth, limitSend, ah(async (req, res) => {
   try {
     const push = require('../services/push');
     if (push.enabled() && toUser.fcm_token) {
-      push.sendInfoPush(toUser.fcm_token, '🎙️ Note vocale MboteCall',
-        `${req.user.name || req.user.phone} t'a envoyé une note — ouvre Lokota pour l'écouter`);
+      push.sendInfoPush(toUser.fcm_token,
+        `🎙️ ${req.user.name || req.user.phone}`,
+        'Note vocale — touche pour écouter', {
+          kind: 'message', from: req.user.phone,
+          from_name: req.user.name || '', msg_id: id,
+        });
     }
   } catch (_) {}
 

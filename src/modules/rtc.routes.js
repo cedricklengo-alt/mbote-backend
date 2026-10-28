@@ -23,12 +23,56 @@ const { ah } = require('../util');
 
 const r = express.Router();
 
+/* 🔑 v2.7.1 — Clé API Metered : identifiants TURN FRAIS et temporaires.
+ * Variables Render :
+ *   METERED_API_KEY   → la clé API du tableau de bord Metered
+ *   METERED_SUBDOMAIN → ton application, ex. « mbotecall » ou
+ *                       « mbotecall.metered.live » (les deux marchent)
+ * Ordre de service : Metered (frais) → TURN_* fixes (repli) → STUN seul.
+ * Les identifiants frais sont gardés en cache 6 h (zéro latence ajoutée). */
+let meteredCache = { servers: null, until: 0 };
+
+async function freshMeteredServers() {
+  const key = process.env.METERED_API_KEY || '';
+  let dom = String(process.env.METERED_SUBDOMAIN || '').trim();
+  if (!key || !dom) return null;
+  if (meteredCache.servers && Date.now() < meteredCache.until) {
+    return meteredCache.servers;
+  }
+  dom = dom.replace(/^https?:\/\//, '').replace(/\/.*$/, '');
+  if (!dom.includes('.')) dom += '.metered.live';
+  try {
+    const ctl = new AbortController();
+    const t = setTimeout(() => ctl.abort(), 5000);
+    const resp = await fetch(
+      `https://${dom}/api/v1/turn/credentials?apiKey=${encodeURIComponent(key)}`,
+      { signal: ctl.signal });
+    clearTimeout(t);
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    const list = await resp.json();
+    if (!Array.isArray(list) || !list.length) throw new Error('réponse vide');
+    meteredCache = { servers: list, until: Date.now() + 6 * 3600 * 1000 };
+    console.log(`📡 [RTC] TURN Metered rafraîchi (${list.length} serveurs, cache 6 h)`);
+    return list;
+  } catch (e) {
+    console.error(`⚠️ [RTC] API Metered injoignable (${e.message}) → repli TURN fixes/STUN`);
+    return null;
+  }
+}
+
 r.get('/ice', requireAuth, ah(async (req, res) => {
   const servers = [
     { urls: 'stun:stun.l.google.com:19302' },
     { urls: 'stun:stun.relay.metered.ca:80' },
   ];
 
+  // 1) 🥇 Identifiants FRAIS via la clé API (temporaires, révocables)
+  const fresh = await freshMeteredServers();
+  if (fresh) {
+    return res.json({ iceServers: [...servers, ...fresh], turn: true });
+  }
+
+  // 2) 🥈 Repli : identifiants fixes TURN_* (config historique)
   const urls = String(process.env.TURN_URLS || '')
     .split(',').map((s) => s.trim()).filter(Boolean);
   const user = process.env.TURN_USERNAME || '';
@@ -39,8 +83,7 @@ r.get('/ice', requireAuth, ah(async (req, res) => {
     return res.json({ iceServers: servers, turn: true });
   }
 
-  // ⚠️ Pas de TURN configuré : STUN seul (les réseaux stricts échoueront).
-  // → voir GUIDE-SECURITE-PHASE-A.md pour configurer Metered en 10 min.
+  // 3) ⚠️ STUN seul (les réseaux stricts échoueront).
   res.json({ iceServers: servers, turn: false });
 }));
 

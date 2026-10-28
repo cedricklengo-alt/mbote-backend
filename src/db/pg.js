@@ -161,6 +161,8 @@ ALTER TABLE text_messages ADD COLUMN IF NOT EXISTS attachment TEXT;
 ALTER TABLE text_messages ADD COLUMN IF NOT EXISTS attachment_type TEXT;
 ALTER TABLE text_messages ADD COLUMN IF NOT EXISTS deleted INTEGER DEFAULT 0;
 ALTER TABLE voice_notes ADD COLUMN IF NOT EXISTS deleted INTEGER DEFAULT 0;
+ALTER TABLE text_messages ADD COLUMN IF NOT EXISTS delivered_at BIGINT;
+ALTER TABLE voice_notes ADD COLUMN IF NOT EXISTS delivered_at BIGINT;
 `;
 
 // Convertit les placeholders « ? » (style SQLite) en « $1, $2… » (style PG)

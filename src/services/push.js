@@ -83,17 +83,25 @@ async function sendCallPush(token, fromName, fromPhone) {
 /**
  * ℹ️ Notification d'information (ex. alerte sécurité « PIN réinitialisé »)
  */
-async function sendInfoPush(token, title, body) {
+async function sendInfoPush(token, title, body, data) {
   if (fake) {
     console.log(`🧪 [SIMULATION] push info « ${title} »`);
     return true;
   }
   if (!messaging || !token) return false;
   try {
+    // FCM exige des valeurs texte dans data
+    const safeData = {};
+    for (const [k, v] of Object.entries(data || {})) safeData[k] = String(v);
     await messaging.send({
       token,
-      android: { priority: 'high' },
+      android: {
+        priority: 'high',
+        // 🔔 regroupe les notifs d'un même expéditeur (pas de spam)
+        notification: safeData.from ? { tag: `msg-${safeData.from}` } : {},
+      },
       notification: { title, body },
+      data: safeData,
     });
     return true;
   } catch (e) {

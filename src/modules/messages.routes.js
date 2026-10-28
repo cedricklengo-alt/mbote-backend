@@ -68,7 +68,10 @@ r.post('/send', requireAuth, limitSend, ah(async (req, res) => {
     const push = require('../services/push');
     if (push.enabled() && toUser.fcm_token) {
       const preview = attachment ? '📷 Photo' : (text.length > 60 ? text.slice(0, 57) + '…' : text);
-      push.sendInfoPush(toUser.fcm_token, `💬 ${req.user.name || req.user.phone}`, preview);
+      push.sendInfoPush(toUser.fcm_token, `💬 ${req.user.name || req.user.phone}`, preview, {
+        kind: 'message', from: req.user.phone,
+        from_name: req.user.name || '', msg_id: id,
+      });
     }
   } catch (_) {}
 
@@ -97,6 +100,11 @@ r.get('/threads', requireAuth, ah(async (req, res) => {
      JOIN users ut ON ut.id = tm.to_id
      WHERE tm.from_id = ? OR tm.to_id = ?
      ORDER BY tm.created_at DESC LIMIT 200`, [me, me]);
+
+  // 📬 v2.7 : ce que mon téléphone vient de télécharger est LIVRÉ
+  // (l'expéditeur verra le point plein au prochain rafraîchissement)
+  await db.run(`UPDATE text_messages SET delivered_at=? WHERE to_id=? AND delivered_at IS NULL`, [now(), me]);
+  await db.run(`UPDATE voice_notes SET delivered_at=? WHERE to_id=? AND delivered_at IS NULL`, [now(), me]);
 
   const items = [
     ...notes.map((n) => ({ ...n, kind: 'note' })),
@@ -132,14 +140,18 @@ r.get('/with/:phone', requireAuth, ah(async (req, res) => {
   if (!peer) return res.status(404).json({ error: 'Inconnu' });
   const me = req.user.id;
 
+  // 📬 livré dès que mon téléphone ouvre le fil
+  await db.run(`UPDATE text_messages SET delivered_at=? WHERE to_id=? AND from_id=? AND delivered_at IS NULL`, [now(), me, peer.id]);
+  await db.run(`UPDATE voice_notes SET delivered_at=? WHERE to_id=? AND from_id=? AND delivered_at IS NULL`, [now(), me, peer.id]);
+
   const notes = await db.all(
     `SELECT id, from_id, audio, duration_sec, lang_from, lang_to,
-            transcript, translation, status, created_at, read_at, deleted
+            transcript, translation, status, created_at, read_at, delivered_at, deleted
      FROM voice_notes
      WHERE (from_id = ? AND to_id = ?) OR (from_id = ? AND to_id = ?)
      ORDER BY created_at ASC LIMIT 100`, [me, peer.id, peer.id, me]);
   const texts = await db.all(
-    `SELECT id, from_id, body, lang_from, lang_to, translation, status, created_at, read_at,
+    `SELECT id, from_id, body, lang_from, lang_to, translation, status, created_at, read_at, delivered_at,
             attachment, attachment_type, deleted
      FROM text_messages
      WHERE (from_id = ? AND to_id = ?) OR (from_id = ? AND to_id = ?)
