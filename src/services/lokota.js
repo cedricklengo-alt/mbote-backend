@@ -33,6 +33,26 @@
 const db = require('../db');
 
 const LANGS = { fr: 'français', ln: 'lingala', sw: 'swahili' };
+
+/* 📚 v2.7.2 — Lexique familial fiable : guide le traducteur sur les
+ * expressions les plus fréquentes des familles congolaises. */
+const LEXIQUE = `Lexique fiable (à respecter) :
+- mbote = bonjour/salut · boni ozali ? = comment vas-tu ? · nazali malamu = je vais bien
+- melesi / matondo = merci · mwana na ngai = mon enfant · koko = grand-mère/grand-père
+- Nzambe apambola yo = que Dieu te bénisse · bolingo = amour · nakoya lobi = je viendrai demain
+- mbongo = argent · kelasi = école · likambo te = pas de problème
+- (swahili) jambo/habari = bonjour · asante = merci · mtoto wangu = mon enfant · nakupenda = je t'aime
+Exemples de style attendu :
+- « Mbote koko, boni ozali ? » → « Bonjour grand-mère, comment vas-tu ? »
+- « Tu me manques beaucoup maman » → « Nazali koyoka mposa na yo mingi mama »`;
+
+/* 🗣️ Amorces Whisper : des phrases authentiques qui calent l'oreille du
+ * modèle sur la langue AVANT la transcription (moins d'erreurs phonétiques). */
+const AMORCES = {
+  ln: 'Mbote mama, boni ozali ? Nazali malamu mwana na ngai. Nzambe apambola yo koko. Melesi mingi, nakoya lobi na Kinshasa. Bolingo na ngai.',
+  sw: 'Jambo mama, habari yako ? Niko salama mtoto wangu. Mungu akubariki bibi. Asante sana, nitakuja kesho Kinshasa. Nakupenda sana.',
+  fr: 'Bonjour maman, comment vas-tu ? Je vais bien. Que Dieu te bénisse. Merci beaucoup, je viendrai demain à Kinshasa.',
+};
 const DEMO = () => String(process.env.DEMO_MODE || 'true') === 'true';
 
 const CFG = () => {
@@ -110,6 +130,7 @@ async function processNote(id) {
     fd.append('file', new Blob([buf], { type: 'audio/mp4' }), 'note.m4a');
     fd.append('model', c.sttModel);
     if (LANGS[note.lang_from]) fd.append('language', note.lang_from);
+    if (AMORCES[note.lang_from]) fd.append('prompt', AMORCES[note.lang_from]);
     const tr = await fetchPatient(() => fetch(c.sttUrl, {
       method: 'POST', headers: { Authorization: `Bearer ${c.sttKey}` }, body: fd,
     }), 'transcription');
@@ -125,7 +146,7 @@ async function processNote(id) {
         temperature: 0.2,
         messages: [
           { role: 'system', content:
-            `Tu es un traducteur familial chaleureux. Le texte provient d'une reconnaissance vocale automatique qui fait souvent des erreurs phonétiques, surtout en lingala et swahili : reconstruis d'abord mentalement la phrase la plus probable d'après le contexte, puis traduis fidèlement du ${LANGS[note.lang_from] || note.lang_from} vers le ${LANGS[note.lang_to] || note.lang_to}. Garde le ton affectueux et naturel d'un message familial. Réponds UNIQUEMENT avec la traduction, sans commentaire.` },
+            `Tu es un traducteur familial chaleureux, expert du lingala de Kinshasa et du swahili de l'Est du Congo. Le texte provient d'une reconnaissance vocale automatique qui fait souvent des erreurs phonétiques, surtout en lingala et swahili : reconstruis d'abord mentalement la phrase la plus probable d'après le contexte, puis traduis fidèlement du ${LANGS[note.lang_from] || note.lang_from} vers le ${LANGS[note.lang_to] || note.lang_to}. Garde le ton affectueux et naturel d'un message familial.\n${LEXIQUE}\nRéponds UNIQUEMENT avec la traduction, sans commentaire.` },
           { role: 'user', content: transcript },
         ],
       }),
@@ -176,7 +197,7 @@ async function processMessage(id) {
         temperature: 0.2,
         messages: [
           { role: 'system', content:
-            `Tu es un traducteur familial chaleureux. Traduis fidèlement ce message écrit du ${LANGS[msg.lang_from] || msg.lang_from} vers le ${LANGS[msg.lang_to] || msg.lang_to}. Garde le ton affectueux et naturel d'un message familial, y compris les emojis. Réponds UNIQUEMENT avec la traduction, sans commentaire.` },
+            `Tu es un traducteur familial chaleureux, expert du lingala de Kinshasa et du swahili de l'Est du Congo. Traduis fidèlement ce message écrit du ${LANGS[msg.lang_from] || msg.lang_from} vers le ${LANGS[msg.lang_to] || msg.lang_to}. Garde le ton affectueux et naturel d'un message familial, y compris les emojis.\n${LEXIQUE}\nRéponds UNIQUEMENT avec la traduction, sans commentaire.` },
           { role: 'user', content: msg.body },
         ],
       }),
