@@ -34,7 +34,12 @@ function liveNumbers(call) {
 }
 
 async function finalize(call, cause) {
-  const { elapsed, cost } = liveNumbers(call);
+  let { elapsed, cost } = liveNumbers(call);
+  // ⛑️ Jamais facturer au-delà du plafond autorisé à l'ouverture de l'appel
+  if (call.max_sec && elapsed > call.max_sec) {
+    elapsed = call.max_sec;
+    cost = costFor(elapsed, call.price_per_min_cents);
+  }
   const G = db.fn.greatest;
   await db.tx(async (t) => {
     await t.run(
@@ -62,8 +67,13 @@ r.post('/start', requireAuth, ah(async (req, res) => {
   const to = normalizePhone(req.body.to);
   if (!to) return res.status(400).json({ error: 'Numéro invalide (format +243…)' });
 
-  const active = await db.get(`SELECT id FROM calls WHERE user_id=? AND status != 'ended'`, [req.user.id]);
-  if (active) return res.status(409).json({ error: 'Un appel est déjà en cours' });
+  // 🧯 v2.4 : un appel jamais raccroché (app tuée, réseau coupé) ne doit
+  // plus bloquer — on le solde proprement et on laisse passer le nouveau.
+  let active = await db.get(`SELECT * FROM calls WHERE user_id=? AND status != 'ended'`, [req.user.id]);
+  if (active) {
+    active = await syncState(active);
+    if (active.status !== 'ended') await finalize(active, 'stale_autoclose');
+  }
 
   const FREE_CAP_SEC = 4 * 3600; // 4 h max par appel gratuit
   let price, maxSec, destination, flag, promo = null, packId = null, freeReason = null;

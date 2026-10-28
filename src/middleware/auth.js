@@ -29,11 +29,11 @@ function requireAuth(req, res, next) {
   (async () => {
     const h = req.headers.authorization || '';
     const token = h.startsWith('Bearer ') ? h.slice(7) : null;
-    if (!token) return res.status(401).json({ error: 'Token manquant' });
+    if (!token) return res.status(401).json({ error: 'Token manquant', code: 'AUTH' });
     const payload = verifyToken(token);
-    if (!payload) return res.status(401).json({ error: 'Token invalide ou expiré' });
+    if (!payload) return res.status(401).json({ error: 'Token invalide ou expiré', code: 'AUTH' });
     const user = await db.get('SELECT * FROM users WHERE id = ?', [payload.uid]);
-    if (!user) return res.status(401).json({ error: 'Utilisateur inconnu' });
+    if (!user) return res.status(401).json({ error: 'Utilisateur inconnu', code: 'AUTH' });
     if (user.status === 'blocked') return res.status(403).json({ error: 'Compte bloqué' });
     req.user = user;
     next();

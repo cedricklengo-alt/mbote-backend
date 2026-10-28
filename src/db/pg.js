@@ -159,6 +159,8 @@ ALTER TABLE calls ADD COLUMN IF NOT EXISTS direction TEXT DEFAULT 'out';
 ALTER TABLE users ADD COLUMN IF NOT EXISTS fcm_token TEXT;
 ALTER TABLE text_messages ADD COLUMN IF NOT EXISTS attachment TEXT;
 ALTER TABLE text_messages ADD COLUMN IF NOT EXISTS attachment_type TEXT;
+ALTER TABLE text_messages ADD COLUMN IF NOT EXISTS deleted INTEGER DEFAULT 0;
+ALTER TABLE voice_notes ADD COLUMN IF NOT EXISTS deleted INTEGER DEFAULT 0;
 `;
 
 // Convertit les placeholders « ? » (style SQLite) en « $1, $2… » (style PG)

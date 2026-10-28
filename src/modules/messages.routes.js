@@ -82,14 +82,14 @@ r.get('/threads', requireAuth, ah(async (req, res) => {
   const notes = await db.all(
     `SELECT vn.id, vn.from_id, vn.duration_sec, vn.created_at, vn.read_at,
             uf.phone AS from_phone, uf.name AS from_name,
-            ut.phone AS to_phone,   ut.name AS to_name
+            ut.phone AS to_phone,   ut.name AS to_name, vn.deleted
      FROM voice_notes vn
      JOIN users uf ON uf.id = vn.from_id
      JOIN users ut ON ut.id = vn.to_id
      WHERE vn.from_id = ? OR vn.to_id = ?
      ORDER BY vn.created_at DESC LIMIT 200`, [me, me]);
   const texts = await db.all(
-    `SELECT tm.id, tm.from_id, tm.body, tm.attachment_type, tm.created_at, tm.read_at,
+    `SELECT tm.id, tm.from_id, tm.body, tm.attachment_type, tm.created_at, tm.read_at, tm.deleted,
             uf.phone AS from_phone, uf.name AS from_name,
             ut.phone AS to_phone,   ut.name AS to_name
      FROM text_messages tm
@@ -110,7 +110,8 @@ r.get('/threads', requireAuth, ah(async (req, res) => {
     const peerName = mine ? it.to_name : it.from_name;
     let t = threads.get(peerPhone);
     if (!t) {
-      const preview = it.kind === 'text'
+      const preview = it.deleted ? '🚫 Message supprimé'
+        : it.kind === 'text'
         ? (it.attachment_type === 'image' && !it.body ? '📷 Photo'
            : (it.body.length > 44 ? it.body.slice(0, 41) + '…' : it.body))
         : `🎙️ ${it.duration_sec}s`;
@@ -133,13 +134,13 @@ r.get('/with/:phone', requireAuth, ah(async (req, res) => {
 
   const notes = await db.all(
     `SELECT id, from_id, audio, duration_sec, lang_from, lang_to,
-            transcript, translation, status, created_at, read_at
+            transcript, translation, status, created_at, read_at, deleted
      FROM voice_notes
      WHERE (from_id = ? AND to_id = ?) OR (from_id = ? AND to_id = ?)
      ORDER BY created_at ASC LIMIT 100`, [me, peer.id, peer.id, me]);
   const texts = await db.all(
     `SELECT id, from_id, body, lang_from, lang_to, translation, status, created_at, read_at,
-            attachment, attachment_type
+            attachment, attachment_type, deleted
      FROM text_messages
      WHERE (from_id = ? AND to_id = ?) OR (from_id = ? AND to_id = ?)
      ORDER BY created_at ASC LIMIT 200`, [me, peer.id, peer.id, me]);
@@ -165,6 +166,28 @@ r.post('/with/:phone/read', requireAuth, ah(async (req, res) => {
     `UPDATE voice_notes SET read_at = ? WHERE to_id = ? AND from_id = ? AND read_at IS NULL`,
     [t, req.user.id, peer.id]);
   res.json({ ok: true });
+}));
+
+/* 🗑️ v2.4 : supprimer pour tout le monde (expéditeur uniquement).
+   Le contenu est vidé des deux côtés — comme WhatsApp. */
+r.delete('/:id', requireAuth, ah(async (req, res) => {
+  const id = String(req.params.id || '');
+  const me = req.user.id;
+  const txt = await db.get(`SELECT id, from_id FROM text_messages WHERE id = ?`, [id]);
+  if (txt) {
+    if (txt.from_id !== me) return res.status(403).json({ error: 'Seul l\'expéditeur peut supprimer ce message' });
+    await db.run(
+      `UPDATE text_messages SET deleted=1, body='', translation=NULL, attachment=NULL, attachment_type=NULL WHERE id=?`, [id]);
+    return res.json({ ok: true });
+  }
+  const vn = await db.get(`SELECT id, from_id FROM voice_notes WHERE id = ?`, [id]);
+  if (vn) {
+    if (vn.from_id !== me) return res.status(403).json({ error: 'Seul l\'expéditeur peut supprimer ce message' });
+    await db.run(
+      `UPDATE voice_notes SET deleted=1, audio='', transcript=NULL, translation=NULL WHERE id=?`, [id]);
+    return res.json({ ok: true });
+  }
+  res.status(404).json({ error: 'Message introuvable' });
 }));
 
 module.exports = r;

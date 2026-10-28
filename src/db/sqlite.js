@@ -160,6 +160,8 @@ const MIGRATIONS = [
   `ALTER TABLE users ADD COLUMN fcm_token TEXT`,
   `ALTER TABLE text_messages ADD COLUMN attachment TEXT`,
   `ALTER TABLE text_messages ADD COLUMN attachment_type TEXT`,
+  `ALTER TABLE text_messages ADD COLUMN deleted INTEGER DEFAULT 0`,
+  `ALTER TABLE voice_notes ADD COLUMN deleted INTEGER DEFAULT 0`,
 ];
 
 let db;
