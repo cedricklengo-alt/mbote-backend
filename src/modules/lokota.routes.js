@@ -45,14 +45,16 @@ r.post('/send', requireAuth, limitSend, ah(async (req, res) => {
   const lf = OK_LANGS.includes(req.body.lang_from) ? req.body.lang_from : 'fr';
   const lt = OK_LANGS.includes(req.body.lang_to) ? req.body.lang_to : 'ln';
 
+  // 🔒 v2.2 Mode privé : le contenu n'est JAMAIS envoyé à l'IA
+  const priv = req.body.translate === false;
   const id = uid('vn');
   await db.run(
     `INSERT INTO voice_notes(id, from_id, to_id, audio, duration_sec, lang_from, lang_to, status, created_at)
-     VALUES(?,?,?,?,?,?,?,'pending',?)`,
-    [id, req.user.id, toUser.id, audio, dur, lf, lt, now()]);
+     VALUES(?,?,?,?,?,?,?,?,?)`,
+    [id, req.user.id, toUser.id, audio, dur, lf, lt, priv ? 'no_ai' : 'pending', now()]);
 
-  // 🧠 Traduction en tâche de fond (ne bloque pas l'envoi)
-  setImmediate(() => lokota.processNote(id).catch(() => {}));
+  // 🧠 Traduction en tâche de fond (sauf mode privé)
+  if (!priv) setImmediate(() => lokota.processNote(id).catch(() => {}));
 
   // 🔔 Prévenir le destinataire (app fermée comprise)
   try {
@@ -64,7 +66,7 @@ r.post('/send', requireAuth, limitSend, ah(async (req, res) => {
   } catch (_) {}
 
   console.log(`🗣️ [LOKOTA] Note ${id} : ${req.user.phone} → ${to} (${lf} → ${lt}, ${dur}s)`);
-  res.json({ id, status: 'pending', lokota_mode: lokota.mode() });
+  res.json({ id, status: priv ? 'no_ai' : 'pending', lokota_mode: lokota.mode() });
 }));
 
 /* 📚 Fils de discussion (dernière note par proche, sans l'audio) */

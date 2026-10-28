@@ -79,6 +79,7 @@ db.init().then(() => {
   const server = http.createServer(app);
   require('./services/push').init(); // 🔔 notifications d'appel (Firebase)
   require('./modules/rtc.ws').init(server); // 🎙️ appels voix temps réel
+  require('./services/retention').start(); // 🧹 v2.2 purge auto des contenus livrés
   server.listen(PORT, '0.0.0.0', () => {
     console.log(`✅ MboteCall backend démarré sur le port ${PORT}`);
     console.log(`   Base de données : ${db.name}`);

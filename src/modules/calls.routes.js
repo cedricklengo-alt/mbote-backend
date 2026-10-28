@@ -69,10 +69,13 @@ r.post('/start', requireAuth, ah(async (req, res) => {
   let price, maxSec, destination, flag, promo = null, packId = null, freeReason = null;
   let calleeName = null, calleeAvatar = null;
 
+  // ☎️ v2.3 : l'appelant peut FORCER le GSM (ex. proche injoignable sur l'app)
+  const forceGsm = req.body.mode === 'gsm';
+
   // 💚 1. Appel MboteCall : GRATUIT si l'appelé a l'app
   const toUser = await db.get(
     `SELECT id, name, avatar, fcm_token FROM users WHERE phone = ? AND role = 'user' AND status = 'active'`, [to]);
-  if (toUser && toUser.id !== req.user.id) {
+  if (!forceGsm && toUser && toUser.id !== req.user.id) {
     price = 0; destination = 'MboteCall'; flag = '💚';
     maxSec = FREE_CAP_SEC; freeReason = 'mbote';
     calleeName = toUser.name || null;

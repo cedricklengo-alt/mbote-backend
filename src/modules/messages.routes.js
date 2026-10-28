@@ -38,33 +38,42 @@ r.post('/send', requireAuth, limitSend, ah(async (req, res) => {
   if (toUser.id === req.user.id) return res.status(400).json({ error: 'Tu ne peux pas t\'écrire à toi-même 😄' });
 
   const text = String(req.body.text || '').trim();
-  if (!text) return res.status(400).json({ error: 'Message vide' });
+  // 📎 v2.3 : photo jointe (data URI compressée côté app)
+  const attachment = String(req.body.attachment || '');
+  if (attachment) {
+    if (!attachment.startsWith('data:image/')) return res.status(400).json({ error: 'Pièce jointe non reconnue (photo uniquement)' });
+    if (attachment.length > 400_000) return res.status(400).json({ error: 'Photo trop lourde — réessaie, elle sera compressée davantage' });
+  }
+  if (!text && !attachment) return res.status(400).json({ error: 'Message vide' });
   if (text.length > 1000) return res.status(400).json({ error: 'Message trop long (1000 caractères max)' });
 
   const lf = OK_LANGS.includes(req.body.lang_from) ? req.body.lang_from : 'fr';
   const lt = OK_LANGS.includes(req.body.lang_to) ? req.body.lang_to : 'ln';
-  const sameLang = lf === lt;
+  // 🔒 v2.2 Mode privé (translate:false) : contenu jamais envoyé à l'IA
+  const sameLang = lf === lt || req.body.translate === false;
 
   const id = uid('tm');
+  const needsAi = !sameLang && text.length > 0; // photo seule : rien à traduire
   await db.run(
-    `INSERT INTO text_messages(id, from_id, to_id, body, lang_from, lang_to, status, created_at)
-     VALUES(?,?,?,?,?,?,?,?)`,
-    [id, req.user.id, toUser.id, text, lf, lt, sameLang ? 'done' : 'pending', now()]);
+    `INSERT INTO text_messages(id, from_id, to_id, body, lang_from, lang_to, status, created_at, attachment, attachment_type)
+     VALUES(?,?,?,?,?,?,?,?,?,?)`,
+    [id, req.user.id, toUser.id, text, lf, lt, needsAi ? 'pending' : 'done', now(),
+     attachment || null, attachment ? 'image' : null]);
 
   // 🧠 Traduction en tâche de fond (seulement si les langues diffèrent)
-  if (!sameLang) setImmediate(() => lokota.processMessage(id).catch(() => {}));
+  if (needsAi) setImmediate(() => lokota.processMessage(id).catch(() => {}));
 
   // 🔔 Prévenir le destinataire (app fermée comprise)
   try {
     const push = require('../services/push');
     if (push.enabled() && toUser.fcm_token) {
-      const preview = text.length > 60 ? text.slice(0, 57) + '…' : text;
+      const preview = attachment ? '📷 Photo' : (text.length > 60 ? text.slice(0, 57) + '…' : text);
       push.sendInfoPush(toUser.fcm_token, `💬 ${req.user.name || req.user.phone}`, preview);
     }
   } catch (_) {}
 
   console.log(`💬 [MESSAGES] ${id} : ${req.user.phone} → ${to} (${lf} → ${lt}, ${text.length} car.)`);
-  res.json({ id, status: sameLang ? 'done' : 'pending', lokota_mode: lokota.mode() });
+  res.json({ id, status: needsAi ? 'pending' : 'done', lokota_mode: lokota.mode() });
 }));
 
 /* 📚 Fils de discussion UNIFIÉS (dernier échange par proche, texte ou note) */
@@ -80,7 +89,7 @@ r.get('/threads', requireAuth, ah(async (req, res) => {
      WHERE vn.from_id = ? OR vn.to_id = ?
      ORDER BY vn.created_at DESC LIMIT 200`, [me, me]);
   const texts = await db.all(
-    `SELECT tm.id, tm.from_id, tm.body, tm.created_at, tm.read_at,
+    `SELECT tm.id, tm.from_id, tm.body, tm.attachment_type, tm.created_at, tm.read_at,
             uf.phone AS from_phone, uf.name AS from_name,
             ut.phone AS to_phone,   ut.name AS to_name
      FROM text_messages tm
@@ -102,7 +111,8 @@ r.get('/threads', requireAuth, ah(async (req, res) => {
     let t = threads.get(peerPhone);
     if (!t) {
       const preview = it.kind === 'text'
-        ? (it.body.length > 44 ? it.body.slice(0, 41) + '…' : it.body)
+        ? (it.attachment_type === 'image' && !it.body ? '📷 Photo'
+           : (it.body.length > 44 ? it.body.slice(0, 41) + '…' : it.body))
         : `🎙️ ${it.duration_sec}s`;
       t = { peer_phone: peerPhone, peer_name: peerName || '',
             last_at: it.created_at, last_kind: it.kind,
@@ -128,7 +138,8 @@ r.get('/with/:phone', requireAuth, ah(async (req, res) => {
      WHERE (from_id = ? AND to_id = ?) OR (from_id = ? AND to_id = ?)
      ORDER BY created_at ASC LIMIT 100`, [me, peer.id, peer.id, me]);
   const texts = await db.all(
-    `SELECT id, from_id, body, lang_from, lang_to, translation, status, created_at, read_at
+    `SELECT id, from_id, body, lang_from, lang_to, translation, status, created_at, read_at,
+            attachment, attachment_type
      FROM text_messages
      WHERE (from_id = ? AND to_id = ?) OR (from_id = ? AND to_id = ?)
      ORDER BY created_at ASC LIMIT 200`, [me, peer.id, peer.id, me]);

@@ -62,4 +62,15 @@ r.post('/check', requireAuth, ah(async (req, res) => {
   res.json({ mbote });
 }));
 
+/* 👤 v2.3 — Profil public d'un proche (nom, photo, ancienneté)
+ * Consultable depuis une conversation ou un écran d'appel. */
+r.get('/profile/:phone', requireAuth, ah(async (req, res) => {
+  const phone = normalizePhone(req.params.phone);
+  if (!phone) return res.status(400).json({ error: 'Numéro invalide' });
+  const u = await db.get(
+    `SELECT name, avatar, created_at FROM users WHERE phone = ? AND role = 'user' AND status = 'active'`, [phone]);
+  if (!u) return res.status(404).json({ error: 'Pas encore sur MboteCall' });
+  res.json({ phone, name: u.name || '', avatar: u.avatar || null, member_since: u.created_at });
+}));
+
 module.exports = r;

@@ -158,6 +158,8 @@ const MIGRATIONS = [
   `ALTER TABLE users ADD COLUMN avatar TEXT`,
   `ALTER TABLE calls ADD COLUMN direction TEXT DEFAULT 'out'`,
   `ALTER TABLE users ADD COLUMN fcm_token TEXT`,
+  `ALTER TABLE text_messages ADD COLUMN attachment TEXT`,
+  `ALTER TABLE text_messages ADD COLUMN attachment_type TEXT`,
 ];
 
 let db;
