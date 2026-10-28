@@ -17,6 +17,7 @@ const { uid, now, normalizePhone, ah } = require('../util');
 const { requireAuth } = require('../middleware/auth');
 const { rateLimit } = require('../middleware/ratelimit');
 const lokota = require('../services/lokota');
+const rtcWs = require('./rtc.ws'); // 🟢 v2.8 : présence en ligne (WebSocket)
 
 const r = express.Router();
 const OK_LANGS = ['fr', 'ln', 'sw'];
@@ -83,7 +84,7 @@ r.post('/send', requireAuth, limitSend, ah(async (req, res) => {
 r.get('/threads', requireAuth, ah(async (req, res) => {
   const me = req.user.id;
   const notes = await db.all(
-    `SELECT vn.id, vn.from_id, vn.duration_sec, vn.created_at, vn.read_at,
+    `SELECT vn.id, vn.from_id, vn.duration_sec, vn.created_at, vn.read_at, vn.delivered_at,
             uf.phone AS from_phone, uf.name AS from_name,
             ut.phone AS to_phone,   ut.name AS to_name, vn.deleted
      FROM voice_notes vn
@@ -92,7 +93,7 @@ r.get('/threads', requireAuth, ah(async (req, res) => {
      WHERE vn.from_id = ? OR vn.to_id = ?
      ORDER BY vn.created_at DESC LIMIT 200`, [me, me]);
   const texts = await db.all(
-    `SELECT tm.id, tm.from_id, tm.body, tm.attachment_type, tm.created_at, tm.read_at, tm.deleted,
+    `SELECT tm.id, tm.from_id, tm.body, tm.attachment_type, tm.created_at, tm.read_at, tm.delivered_at, tm.deleted,
             uf.phone AS from_phone, uf.name AS from_name,
             ut.phone AS to_phone,   ut.name AS to_name
      FROM text_messages tm
@@ -125,12 +126,15 @@ r.get('/threads', requireAuth, ah(async (req, res) => {
         : `🎙️ ${it.duration_sec}s`;
       t = { peer_phone: peerPhone, peer_name: peerName || '',
             last_at: it.created_at, last_kind: it.kind,
-            last_mine: mine, last_preview: preview, unread: 0 };
+            last_mine: mine, last_preview: preview, unread: 0,
+            // ✔ v2.8 : état de MON dernier message (sent → delivered → read)
+            last_state: mine ? (it.read_at ? 'read' : (it.delivered_at ? 'delivered' : 'sent')) : null };
       threads.set(peerPhone, t);
     }
     if (!mine && !it.read_at) t.unread++;
   }
-  res.json([...threads.values()]);
+  // 🟢 v2.8 : qui est en ligne en ce moment (connexion WebSocket active)
+  res.json([...threads.values()].map((t) => ({ ...t, online: rtcWs.isOnline(t.peer_phone) })));
 }));
 
 /* 💬 Conversation complète avec un proche (textes + notes, triés) */
@@ -162,7 +166,7 @@ r.get('/with/:phone', requireAuth, ah(async (req, res) => {
     ...texts.map((t) => ({ ...t, kind: 'text', mine: t.from_id === me })),
   ].sort((a, b) => a.created_at - b.created_at);
 
-  res.json({ peer_name: peer.name || '', items });
+  res.json({ peer_name: peer.name || '', peer_online: rtcWs.isOnline(phone), items });
 }));
 
 /* ✓✓ Marquer comme lus (textes ET notes) */
