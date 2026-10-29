@@ -55,7 +55,33 @@ FAMILLE (le cœur des messages) :
 AMOUR & ÉMOTIONS :
 - bolingo = amour · nalingi yo (mingi) = je t'aime (beaucoup) · bolingo na ngai = mon amour
 - nazali koyoka mposa na yo = tu me manques · esengo = joie · mawa = tristesse/peine
+- motema pasi = chagrin, mal au cœur (peine) · komitungisa te = ne t'inquiète pas
+- nazali na posa na yo = j'ai envie de toi / je te désire (c'est LA tournure correcte —
+  « nazali na nzala ya yo » ne se dit PAS ; nzala = uniquement la faim)
+- opesi nga lokumu = tu m'as honoré = « je suis fier de toi » (lokumu = honneur —
+  c'est AINSI qu'un parent dit sa fierté à son enfant, pas par une traduction littérale)
 - kolela = pleurer · kimia = paix/tranquille · keba = fais attention/prends soin de toi
+- posa / mposa = envie, désir, besoin · « nazali na posa ya ko… » = « j'ai envie de… » + verbe qui suit
+  (traduis TOUJOURS le verbe qui suit « posa ya », jamais un autre verbe)
+
+INTIMITÉ ENTRE ADULTES (messages privés entre époux — traduire FIDÈLEMENT, sans censure ni détournement) :
+- kosiba (argot cru de Kinshasa) = faire l'amour / avoir des rapports sexuels
+  · « nazali na posa ya kosiba » = « j'ai envie de faire l'amour » (et SURTOUT PAS « prier » !)
+- kosangisa nzoto = faire l'amour (forme soutenue) · kobeta mabe = tromper (infidélité)
+- zemi = grossesse · azali na zemi = elle est enceinte
+- Anatomie (registre VULGAIRE — mots d'apparence anodine, attention !) :
+  masoko = les fesses · makunza = les poils du sexe · libolo / vangi = le sexe féminin (très cru)
+- Règle : respecte le registre du message (cru → direct, poli → poli) ; ne JAMAIS
+  remplacer un mot intime par un mot religieux ou anodin — le couple doit se comprendre.
+
+HOMONYMES PIÈGES (le contexte décide — ne JAMAIS se tromper de sens) :
+- moto = le FEU ou la MOTO (véhicule) — à Kinshasa, une PERSONNE se dit « mutu » (pluriel : bato)
+  · « moto ezali kopela » = « le feu brûle » · « nakei na moto » = « j'y vais à moto » · « mutu wana » = « cette personne-là »
+- lidesu (SINGULIER) = selon le contexte : UN haricot OU le clitoris (vulgaire) ;
+  madesu (PLURIEL) = les haricots (le plat, toujours innocent)
+  · contexte cuisine/repas → haricot(s) · contexte intime → sens vulgaire
+- nzala = la FAIM uniquement (désir de quelqu'un = posa, jamais nzala)
+- lobi = demain OU hier (trancher avec le temps du verbe)
 
 ARGENT & ENVOIS (très fréquent) :
 - mbongo / mosolo / falanga = argent · natindi yo mbongo = je t'ai envoyé de l'argent
@@ -68,6 +94,7 @@ SANTÉ :
 
 FOI (omniprésente dans les familles) :
 - Nzambe = Dieu · Nzambe apambola yo = que Dieu te bénisse · mapamboli = bénédictions
+- Nzambe asunga yo = que Dieu t'aide · Ngolu ya Nzambe = la grâce de Dieu
 - losambo = prière · nasambeli mpo na yo = je prie pour toi · lingomba/ndako ya Nzambe = église
 
 QUOTIDIEN, TEMPS & VOYAGE :
@@ -103,7 +130,23 @@ LIEUX & POSITIONS (ne JAMAIS les confondre) :
 - zando = marché · na zando = au marché · nzela = route / chemin · na nzela = en route
 - balabala = rue / avenue · esika = endroit · awa = ici · kuna = là-bas
 
+ARGOT DE KINSHASA (validé par des locuteurs — traduire avec le sens populaire exact) :
+- kobeta libanga = faire un petit boulot (la débrouille au jour le jour)
+  · « nazali kobeta libanga » = « je fais un petit boulot » · « akei kobeta libanga » = « il/elle est parti(e) faire un petit boulot »
+- mopao = le patron (aussi surnom de Koffi Olomide) · masta = l'ami, le pote
+- kiekie = mdr / rires (à garder comme rire : « mdr » ou « haha »)
+- eza boye = c'est comme ça · eza bien = c'est bien
+- eloko ya somo = selon le CONTEXTE : « un truc effrayant » (peur) OU « un truc incroyable/impressionnant » (admiration)
+- kolia mbongo (litt. « manger l'argent ») = selon le CONTEXTE : dépenser, gaspiller OU détourner/voler
+  · « azali moyibi, alie mbongo na ngai » = « c'est un voleur, il a détourné mon argent » · moyibi = voleur
 
+VIE MODERNE — TÉLÉPHONE & MOBILE MONEY (très fréquent, à traduire tel quel) :
+- « nazali lisusu na crédit/unité te » = « je n'ai plus de crédit/d'unités »
+- « réseau ezali mabe » = « le réseau est mauvais » · « batterie na ngai ekufi / ebebi » = « ma batterie est morte »
+- kobimisa mbongo = retirer l'argent (faire le retrait) · « mbongo po na kobimisa » = « l'argent à retirer »
+- « ekati boni ? » = « combien ça a coupé/prélevé ? » (les frais) · « mbongo po na kobimisa ekati boni ? » = « le retrait a pris combien de frais ? »
+
+SWAHILI DE L'EST (familles de Lubumbashi/Goma/Bukavu) :
 - jambo/habari = bonjour · habari yako ? = comment vas-tu ? · asante sana = merci beaucoup
 - mtoto wangu = mon enfant · bibi = grand-mère · babu = grand-père · ndugu = frère/parent
 - nakupenda = je t'aime · nimekukumbuka = tu me manques · pole = désolé/courage
@@ -111,6 +154,20 @@ LIEUX & POSITIONS (ne JAMAIS les confondre) :
 - mgonjwa = malade · dawa = médicament · Mungu akubariki = que Dieu te bénisse
 - kesho = demain · leo = aujourd'hui · sasa = maintenant · safari njema = bon voyage
 - hakuna shida = pas de problème · lala salama = dors bien · nipigie simu = appelle-moi
+
+PROVERBES (traduire par le SENS, en gardant l'image si elle reste claire) :
+- « mosapi moko esokolaka elongi te » (litt. « un seul doigt ne lave pas le visage »)
+  = ensemble nous sommes forts / l'union fait la force
+- Règle : un proverbe ne se traduit JAMAIS mot à mot sans son sens — donner le sens,
+  éventuellement suivi de l'image entre parenthèses si elle enrichit le message.
+
+CONTRACTIONS COURANTES (parler de Kin & écriture SMS — MÊME SENS que la forme pleine) :
+- nga = ngai (moi/je) · « bolingo na nga » = « bolingo na ngai » = mon amour
+- naza = nazali (je suis) — le modèle « -zali → -za » vaut pour toutes les personnes :
+  oza = ozali (tu es) · aza = azali (il/elle est) · eza = ezali (c'est) · toza = tozali (nous sommes) · baza = bazali (ils/elles sont)
+- po = mpo (pour / parce que) · « po na yo » = « mpo na yo » = pour toi · po na nini = pourquoi
+- Ces formes contractées sont NORMALES dans les messages : les comprendre sans les « corriger »,
+  et traduire exactement comme la forme pleine.
 
 ERREURS FRÉQUENTES DE LA RECONNAISSANCE VOCALE → FORME CORRECTE :
 - « m'boté, embouté, bothé » → mbote · « bony/bonne i ozali » → boni ozali
@@ -129,7 +186,10 @@ RÈGLES DE STYLE :
 4. « lobi » = demain OU hier : choisis selon le verbe (nakoya lobi = futur → demain).
 5. INTERDIT d'inventer un sens : si un mot t'échappe, appuie-toi sur le lexique
    ci-dessus et le contexte ; décompose le verbe (préfixe sujet + racine + temps)
-   plutôt que de deviner. Ne remplace JAMAIS un lieu par un autre (libanda ≠ mbeto).
+   plutôt que de deviner. Ne remplace JAMAIS un lieu par un autre (libanda ≠ mbeto),
+   ni un mot intime par un mot religieux ou anodin (kosiba ≠ kosambela).
+6. « posa ya ko-X » = « envie de X » : c'est le verbe X qu'il faut traduire,
+   exactement lui, rien d'autre.
 
 Exemples de style attendu :
 - « Mbote koko, boni ozali ? » → « Bonjour grand-mère, comment vas-tu ? »
@@ -137,7 +197,8 @@ Exemples de style attendu :
 - « Natindi yo mbongo lelo, yebisa ngai soki ozwi yango » → « Je t'ai envoyé l'argent aujourd'hui, dis-moi quand tu l'as reçu »
 - « Les enfants vont bien, ils sont à l'école » → « Bana bazali malamu, bazali na kelasi »
 - « Na telemi na libanda » → « Je me suis tenu(e) debout dehors » (et SURTOUT PAS « je suis au lit »)
-- « Nalali naino te, nazali kozela yo » → « Je ne dors pas encore, je t'attends »`;
+- « Nalali naino te, nazali kozela yo » → « Je ne dors pas encore, je t'attends »
+- « Nazali na posa ya kosiba » → « J'ai envie de faire l'amour » (registre intime assumé — PAS « prier »)`;
 
 /* 🗣️ Amorces Whisper v2.8.2 : phrases authentiques, enrichies des sonorités
  * les plus fréquentes (famille, argent, foi, santé) pour caler l'oreille du
