@@ -80,7 +80,30 @@ QUOTIDIEN, TEMPS & VOYAGE :
 - yebisa mama = dis à maman · zela moke = attends un peu · yaka = viens · likambo te / eloko te = pas de problème / de rien
 - malamu = bien · mabe = mauvais · kitoko = beau/joli · mingi = beaucoup · moke = un peu
 
-SWAHILI DE L'EST (familles de Lubumbashi/Goma/Bukavu) :
+VERBES DU QUOTIDIEN (avec leurs formes conjuguées courantes — « na- » = je, « o- » = tu, « a- » = il/elle, « to- » = nous, « bo- » = vous, « ba- » = ils/elles ; le suffixe « -i » marque le présent/passé proche, « nako- » le futur) :
+- kotelema = se lever / se tenir DEBOUT · natelemi = je suis debout / je me suis levé(e) · telema = lève-toi
+- kolala = dormir / se coucher · nalali = je dors / je suis couché(e) · lala malamu = dors bien
+- kofanda / kovanda = s'asseoir / habiter · nafandi = je suis assis(e) / j'habite
+- kobima = sortir · nabimi = je suis sorti(e) · kokota = entrer · nakoti = je suis entré(e)
+- kokoma = arriver (ou écrire) · nakomi = je suis arrivé(e) · kotambola = marcher
+- kopema = se reposer · napemi = je me repose · kokima = courir / fuir
+- kosala = faire / travailler · nasali = j'ai fait · kozwa = recevoir / prendre · nazwi = j'ai reçu
+- komona = voir · namoni = j'ai vu · koyoka = entendre / sentir · nayoki = j'ai entendu
+- koyeba = savoir · nayebi = je sais · nayebi te = je ne sais pas
+- koloba = dire / parler · nalobi = j'ai dit · kokanisa = penser · nakanisi = je pense
+- kosomba = acheter · koteka = vendre · kolamba = cuisiner · kosukola = laver
+- kozela = attendre · nazali kozela = j'attends · kobanga = avoir peur · kobanga te = n'aie pas peur
+- Négation : « te » en FIN de phrase = ne…pas (nalali te = je ne dors pas) · naino te = pas encore
+
+LIEUX & POSITIONS (ne JAMAIS les confondre) :
+- libanda = DEHORS / à l'extérieur · na libanda = dehors · « natelemi na libanda » = « je me suis tenu(e) debout dehors / je suis dehors »
+- na kati = à l'intérieur / dedans · na kati ya ndako = dans la maison
+- mbeto = lit · na mbeto = au lit (SEUL « mbeto » signifie « lit » — libanda n'a RIEN à voir avec le lit)
+- likolo = en haut / le ciel · na nse = en bas / par terre · pembeni = à côté · mosika = loin · pene = près
+- zando = marché · na zando = au marché · nzela = route / chemin · na nzela = en route
+- balabala = rue / avenue · esika = endroit · awa = ici · kuna = là-bas
+
+
 - jambo/habari = bonjour · habari yako ? = comment vas-tu ? · asante sana = merci beaucoup
 - mtoto wangu = mon enfant · bibi = grand-mère · babu = grand-père · ndugu = frère/parent
 - nakupenda = je t'aime · nimekukumbuka = tu me manques · pole = désolé/courage
@@ -104,12 +127,17 @@ RÈGLES DE STYLE :
 2. Vers le lingala : écris un lingala parlé et chaleureux, pas un lingala littéraire.
 3. Garde les noms propres, plats (fufu, pondu…) et sommes d'argent tels quels.
 4. « lobi » = demain OU hier : choisis selon le verbe (nakoya lobi = futur → demain).
+5. INTERDIT d'inventer un sens : si un mot t'échappe, appuie-toi sur le lexique
+   ci-dessus et le contexte ; décompose le verbe (préfixe sujet + racine + temps)
+   plutôt que de deviner. Ne remplace JAMAIS un lieu par un autre (libanda ≠ mbeto).
 
 Exemples de style attendu :
 - « Mbote koko, boni ozali ? » → « Bonjour grand-mère, comment vas-tu ? »
 - « Tu me manques beaucoup maman » → « Nazali koyoka mposa na yo mingi mama »
 - « Natindi yo mbongo lelo, yebisa ngai soki ozwi yango » → « Je t'ai envoyé l'argent aujourd'hui, dis-moi quand tu l'as reçu »
-- « Les enfants vont bien, ils sont à l'école » → « Bana bazali malamu, bazali na kelasi »`;
+- « Les enfants vont bien, ils sont à l'école » → « Bana bazali malamu, bazali na kelasi »
+- « Na telemi na libanda » → « Je me suis tenu(e) debout dehors » (et SURTOUT PAS « je suis au lit »)
+- « Nalali naino te, nazali kozela yo » → « Je ne dors pas encore, je t'attends »`;
 
 /* 🗣️ Amorces Whisper v2.8.2 : phrases authentiques, enrichies des sonorités
  * les plus fréquentes (famille, argent, foi, santé) pour caler l'oreille du
@@ -118,6 +146,7 @@ const AMORCES = {
   ln: 'Mbote mama, boni ozali ? Nazali malamu mwana na ngai, melesi mingi. ' +
       'Nzambe apambola yo koko, nasambeli mpo na yo. Natindi yo mbongo lelo, ' +
       'yebisa ngai soki ozwi yango. Bana bazali malamu, bazali na kelasi. ' +
+      'Natelemi na libanda ya ndako, nazali kozela yo. Nalali naino te. ' +
       'Nazali koyoka mposa na yo, nalingi yo mingi. Nakobenga yo lobi na Kinshasa. ' +
       'Pesa libota mobimba mbote, likambo te. Bolingo na ngai, butu malamu.',
   sw: 'Jambo mama, habari yako ? Niko salama mtoto wangu, asante sana. ' +
