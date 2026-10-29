@@ -34,24 +34,100 @@ const db = require('../db');
 
 const LANGS = { fr: 'français', ln: 'lingala', sw: 'swahili' };
 
-/* 📚 v2.7.2 — Lexique familial fiable : guide le traducteur sur les
- * expressions les plus fréquentes des familles congolaises. */
-const LEXIQUE = `Lexique fiable (à respecter) :
-- mbote = bonjour/salut · boni ozali ? = comment vas-tu ? · nazali malamu = je vais bien
-- melesi / matondo = merci · mwana na ngai = mon enfant · koko = grand-mère/grand-père
-- Nzambe apambola yo = que Dieu te bénisse · bolingo = amour · nakoya lobi = je viendrai demain
-- mbongo = argent · kelasi = école · likambo te = pas de problème
-- (swahili) jambo/habari = bonjour · asante = merci · mtoto wangu = mon enfant · nakupenda = je t'aime
+/* 📚 v2.8.2 — Bibliothèque lingala/swahili RENFORCÉE : lexique familial
+ * organisé par thèmes de vie + corrections des erreurs phonétiques typiques
+ * de la reconnaissance vocale + gestion du lingala de Kinshasa (mélange
+ * naturel avec le français). Guide le traducteur à chaque message. */
+const LEXIQUE = `Lexique fiable du lingala de Kinshasa (à respecter) :
+
+SALUTATIONS & POLITESSE :
+- mbote = bonjour/salut · mbote na yo = bonjour à toi · losako = salut respectueux aux aînés
+- boni ozali ? / ozali malamu ? = comment vas-tu ? · sango nini ? = quoi de neuf ?
+- nazali malamu = je vais bien · sango malamu = bonne nouvelle · melesi / matondo (mingi) = merci (beaucoup)
+- butu malamu = bonne nuit · mbote ya tongo = bonjour (matin) · tokomonana = on se verra
+
+FAMILLE (le cœur des messages) :
+- mama = maman · tata/papa = papa · koko = grand-mère/grand-père · noko = oncle
+- mwana na ngai = mon enfant · bana = les enfants · libota = la famille
+- ndeko = frère/sœur · yaya = grand frère/grande sœur · leki = petit frère/petite sœur
+- mobali = mari · mwasi = épouse/femme · bato = les gens · pesa bango mbote = passe-leur le bonjour
+
+AMOUR & ÉMOTIONS :
+- bolingo = amour · nalingi yo (mingi) = je t'aime (beaucoup) · bolingo na ngai = mon amour
+- nazali koyoka mposa na yo = tu me manques · esengo = joie · mawa = tristesse/peine
+- kolela = pleurer · kimia = paix/tranquille · keba = fais attention/prends soin de toi
+
+ARGENT & ENVOIS (très fréquent) :
+- mbongo / mosolo / falanga = argent · natindi yo mbongo = je t'ai envoyé de l'argent
+- kotinda = envoyer · nazali kozela mbongo = j'attends l'argent · matabisi = cadeau/bonus
+- futa = payer · niongo = dette · soki ozwi yango = quand tu l'auras reçu
+
+SANTÉ :
+- bokolongono = santé · nazali kobela = je suis malade · maladi/bokono = maladie
+- lopitalo = hôpital · monganga = docteur · kisi = médicament · abiki = il/elle est guéri(e)
+
+FOI (omniprésente dans les familles) :
+- Nzambe = Dieu · Nzambe apambola yo = que Dieu te bénisse · mapamboli = bénédictions
+- losambo = prière · nasambeli mpo na yo = je prie pour toi · lingomba/ndako ya Nzambe = église
+
+QUOTIDIEN, TEMPS & VOYAGE :
+- lelo = aujourd'hui · lobi = demain OU hier (contexte !) · sika oyo = maintenant · na nsima = après
+- poso = semaine · sanza = mois · mbula = année/pluie · ntango = temps/heure
+- ndako = maison · mboka = pays/village · Poto = l'Europe · kelasi = école · mosala = travail
+- nakei = je pars · nakoya = je viendrai · nakozonga = je reviendrai · mobembo malamu = bon voyage
+- kolia = manger · bilei = nourriture · mayi = eau · lipa = pain · loso = riz · fufu, pondu, madesu, makemba = plats congolais (ne pas traduire)
+- benga ngai = appelle-moi · nabengaki yo = je t'ai appelé · nakobenga yo lobi = je t'appellerai demain
+- yebisa mama = dis à maman · zela moke = attends un peu · yaka = viens · likambo te / eloko te = pas de problème / de rien
+- malamu = bien · mabe = mauvais · kitoko = beau/joli · mingi = beaucoup · moke = un peu
+
+SWAHILI DE L'EST (familles de Lubumbashi/Goma/Bukavu) :
+- jambo/habari = bonjour · habari yako ? = comment vas-tu ? · asante sana = merci beaucoup
+- mtoto wangu = mon enfant · bibi = grand-mère · babu = grand-père · ndugu = frère/parent
+- nakupenda = je t'aime · nimekukumbuka = tu me manques · pole = désolé/courage
+- pesa/fedha = argent · nitakutumia pesa = je t'enverrai de l'argent · kazi = travail · shule = école
+- mgonjwa = malade · dawa = médicament · Mungu akubariki = que Dieu te bénisse
+- kesho = demain · leo = aujourd'hui · sasa = maintenant · safari njema = bon voyage
+- hakuna shida = pas de problème · lala salama = dors bien · nipigie simu = appelle-moi
+
+ERREURS FRÉQUENTES DE LA RECONNAISSANCE VOCALE → FORME CORRECTE :
+- « m'boté, embouté, bothé » → mbote · « bony/bonne i ozali » → boni ozali
+- « na zali, nasali » → nazali · « ozari, o zali » → ozali · « malamou, ma lamou, malamo » → malamu
+- « mélési, mélessi, merci si » → melesi · « n'zambé, zambe » → Nzambe · « bolingue, bolingô » → bolingo
+- « m'bongo, bongo » (contexte argent) → mbongo · « lobby » → lobi · « coco » (contexte famille) → koko
+- « kin shasa, kinchasa » → Kinshasa · « na lingui yo » → nalingi yo
+- Si un mot français/anglais aberrant apparaît au milieu d'une phrase lingala,
+  reconstruis le mot lingala le plus proche phonétiquement d'après le contexte.
+
+RÈGLES DE STYLE :
+1. Le lingala de Kinshasa mélange NATURELLEMENT des mots français (téléphone,
+   rendez-vous, l'école, ça va…) : c'est normal, ne les « corrige » pas.
+2. Vers le lingala : écris un lingala parlé et chaleureux, pas un lingala littéraire.
+3. Garde les noms propres, plats (fufu, pondu…) et sommes d'argent tels quels.
+4. « lobi » = demain OU hier : choisis selon le verbe (nakoya lobi = futur → demain).
+
 Exemples de style attendu :
 - « Mbote koko, boni ozali ? » → « Bonjour grand-mère, comment vas-tu ? »
-- « Tu me manques beaucoup maman » → « Nazali koyoka mposa na yo mingi mama »`;
+- « Tu me manques beaucoup maman » → « Nazali koyoka mposa na yo mingi mama »
+- « Natindi yo mbongo lelo, yebisa ngai soki ozwi yango » → « Je t'ai envoyé l'argent aujourd'hui, dis-moi quand tu l'as reçu »
+- « Les enfants vont bien, ils sont à l'école » → « Bana bazali malamu, bazali na kelasi »`;
 
-/* 🗣️ Amorces Whisper : des phrases authentiques qui calent l'oreille du
- * modèle sur la langue AVANT la transcription (moins d'erreurs phonétiques). */
+/* 🗣️ Amorces Whisper v2.8.2 : phrases authentiques, enrichies des sonorités
+ * les plus fréquentes (famille, argent, foi, santé) pour caler l'oreille du
+ * modèle AVANT la transcription. (Limite Whisper ≈ 224 tokens : respectée.) */
 const AMORCES = {
-  ln: 'Mbote mama, boni ozali ? Nazali malamu mwana na ngai. Nzambe apambola yo koko. Melesi mingi, nakoya lobi na Kinshasa. Bolingo na ngai.',
-  sw: 'Jambo mama, habari yako ? Niko salama mtoto wangu. Mungu akubariki bibi. Asante sana, nitakuja kesho Kinshasa. Nakupenda sana.',
-  fr: 'Bonjour maman, comment vas-tu ? Je vais bien. Que Dieu te bénisse. Merci beaucoup, je viendrai demain à Kinshasa.',
+  ln: 'Mbote mama, boni ozali ? Nazali malamu mwana na ngai, melesi mingi. ' +
+      'Nzambe apambola yo koko, nasambeli mpo na yo. Natindi yo mbongo lelo, ' +
+      'yebisa ngai soki ozwi yango. Bana bazali malamu, bazali na kelasi. ' +
+      'Nazali koyoka mposa na yo, nalingi yo mingi. Nakobenga yo lobi na Kinshasa. ' +
+      'Pesa libota mobimba mbote, likambo te. Bolingo na ngai, butu malamu.',
+  sw: 'Jambo mama, habari yako ? Niko salama mtoto wangu, asante sana. ' +
+      'Mungu akubariki bibi, ninakuombea kila siku. Nimekutumia pesa leo, ' +
+      'niambie ukipokea. Watoto wako salama, wako shuleni. Nimekukumbuka sana, ' +
+      'nakupenda. Nitakupigia simu kesho Kinshasa. Salamia familia yote, hakuna shida. Lala salama.',
+  fr: 'Bonjour maman, comment vas-tu ? Je vais bien mon enfant, merci beaucoup. ' +
+      'Que Dieu te bénisse, je prie pour toi. Je t\'ai envoyé l\'argent aujourd\'hui, ' +
+      'dis-moi quand tu le reçois. Les enfants vont bien, ils sont à l\'école. ' +
+      'Tu me manques beaucoup, je t\'appellerai demain à Kinshasa. Bonne nuit.',
 };
 const DEMO = () => String(process.env.DEMO_MODE || 'true') === 'true';
 

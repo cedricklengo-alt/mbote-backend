@@ -150,6 +150,12 @@ CREATE TABLE IF NOT EXISTS airtime_topups (
   reference    TEXT,
   created_at   BIGINT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS invites (
+  id         TEXT PRIMARY KEY,
+  user_id    TEXT NOT NULL REFERENCES users(id),
+  phone      TEXT NOT NULL,
+  created_at BIGINT NOT NULL
+);
 ALTER TABLE users ADD COLUMN IF NOT EXISTS referral_code TEXT;
 ALTER TABLE users ADD COLUMN IF NOT EXISTS referred_by TEXT;
 ALTER TABLE users ADD COLUMN IF NOT EXISTS referral_rewarded INTEGER DEFAULT 0;

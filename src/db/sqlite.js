@@ -147,6 +147,12 @@ CREATE TABLE IF NOT EXISTS airtime_topups (
   reference    TEXT,
   created_at   INTEGER NOT NULL
 );
+CREATE TABLE IF NOT EXISTS invites (
+  id         TEXT PRIMARY KEY,
+  user_id    TEXT NOT NULL REFERENCES users(id),
+  phone      TEXT NOT NULL,
+  created_at INTEGER NOT NULL
+);
 `;
 
 // Colonnes ajoutées après la V1 (ALTER sans IF NOT EXISTS en SQLite → try/catch)
