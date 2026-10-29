@@ -90,7 +90,7 @@ function init(server) {
       let msg;
       try { msg = JSON.parse(raw.toString()); } catch (_) { return; }
       const type = String(msg.type || '');
-      if (!['offer', 'answer', 'ice', 'reject', 'hangup', 'ringing'].includes(type)) return;
+      if (!['offer', 'answer', 'ice', 'reject', 'hangup', 'ringing', 'reoffer', 'reanswer'].includes(type)) return;
 
       const to = normalizePhone(msg.to);
       const dest = to && online.get(to);
@@ -112,6 +112,8 @@ function init(server) {
           sdp: msg.sdp,
         } : {}),
         ...(type === 'answer' ? { sdp: msg.sdp } : {}),
+        // 🔄 v2.8.1 : relance ICE en pleine conversation (micro-coupures 4G)
+        ...(type === 'reoffer' || type === 'reanswer' ? { sdp: msg.sdp } : {}),
         ...(type === 'ice' ? { candidate: msg.candidate } : {}),
       };
       try { dest.ws.send(JSON.stringify(fwd)); } catch (_) {}
