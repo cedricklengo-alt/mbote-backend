@@ -112,8 +112,7 @@ function init(server) {
           sdp: msg.sdp,
         } : {}),
         ...(type === 'answer' ? { sdp: msg.sdp } : {}),
-        // 🔄 v2.8.1 : relance ICE en pleine conversation (micro-coupures 4G)
-        ...(type === 'reoffer' || type === 'reanswer' ? { sdp: msg.sdp } : {}),
+        ...(type === 'reoffer' || type === 'reanswer' ? { sdp: msg.sdp } : {}), // 🔄 v2.8.1 relance ICE
         ...(type === 'ice' ? { candidate: msg.candidate } : {}),
       };
       try { dest.ws.send(JSON.stringify(fwd)); } catch (_) {}
