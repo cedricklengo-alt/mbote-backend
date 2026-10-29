@@ -70,7 +70,7 @@ r.post('/send', requireAuth, limitSend, ah(async (req, res) => {
     if (push.enabled() && toUser.fcm_token) {
       const preview = attachment ? '📷 Photo' : (text.length > 60 ? text.slice(0, 57) + '…' : text);
       push.sendInfoPush(toUser.fcm_token, `💬 ${req.user.name || req.user.phone}`, preview, {
-        kind: 'message', from: req.user.phone,
+        kind: 'message', from_phone: req.user.phone,
         from_name: req.user.name || '', msg_id: id,
       });
       console.log(`🔔 [PUSH] Notification message envoyée → ${to}`);

@@ -69,7 +69,8 @@ async function sendCallPush(token, fromName, fromPhone) {
       },
       data: {
         kind: 'incoming_call',
-        from: String(fromPhone),
+        // ⚠️ « from » est un mot RÉSERVÉ par FCM (rejet silencieux !) → from_phone
+        from_phone: String(fromPhone),
         from_name: String(fromName || ''),
       },
     });
@@ -90,15 +91,21 @@ async function sendInfoPush(token, title, body, data) {
   }
   if (!messaging || !token) return false;
   try {
-    // FCM exige des valeurs texte dans data
+    // FCM exige des valeurs texte dans data — et INTERDIT certaines clés
+    // réservées (« from », « notification », « message_type », gcm*/google*) :
+    // les présentes seraient rejetées silencieusement → on les écarte.
     const safeData = {};
-    for (const [k, v] of Object.entries(data || {})) safeData[k] = String(v);
+    for (const [k, v] of Object.entries(data || {})) {
+      if (k === 'from' || k === 'notification' || k === 'message_type' ||
+          k.startsWith('google') || k.startsWith('gcm')) continue;
+      safeData[k] = String(v);
+    }
     await messaging.send({
       token,
       android: {
         priority: 'high',
         // 🔔 regroupe les notifs d'un même expéditeur (pas de spam)
-        notification: safeData.from ? { tag: `msg-${safeData.from}` } : {},
+        notification: safeData.from_phone ? { tag: `msg-${safeData.from_phone}` } : {},
       },
       notification: { title, body },
       data: safeData,

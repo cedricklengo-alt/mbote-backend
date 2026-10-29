@@ -63,7 +63,7 @@ r.post('/send', requireAuth, limitSend, ah(async (req, res) => {
       push.sendInfoPush(toUser.fcm_token,
         `🎙️ ${req.user.name || req.user.phone}`,
         'Note vocale — touche pour écouter', {
-          kind: 'message', from: req.user.phone,
+          kind: 'message', from_phone: req.user.phone,
           from_name: req.user.name || '', msg_id: id,
         });
     }
