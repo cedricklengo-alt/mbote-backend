@@ -60,7 +60,7 @@ async function maybeRewardInsideTx(t, userId) {
      RETURNING referred_by`, [userId]);
   if (!u) return false; // pas de parrain, ou déjà récompensé
 
-  for (const [who, label] of [[userId, 'Bonus filleul 🎁'], [u.referred_by, 'Bonus parrainage 🎁']]) {
+  for (const [who, label] of [[userId, 'Bonus filleul'], [u.referred_by, 'Bonus parrainage']]) {
     await t.run('UPDATE wallets SET balance_cents = balance_cents + ? WHERE user_id = ?',
       [BONUS_CENTS, who]);
     await t.run(

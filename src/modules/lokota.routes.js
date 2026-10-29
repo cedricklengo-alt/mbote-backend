@@ -22,9 +22,9 @@ const r = express.Router();
 const OK_LANGS = ['fr', 'ln', 'sw'];
 
 const limitSend = rateLimit({
-  windowMs: 60 * 60_000, max: 20,
+  windowMs: 60 * 60_000, max: 60,
   key: (req) => 'lokota:' + (req.user ? req.user.id : req.ip),
-  message: 'Beaucoup de notes d\'un coup 😅 — réessaie dans une heure',
+  message: 'Trop de notes vocales envoyées. Réessaie dans une heure.',
 });
 
 /* 📤 Envoyer une note vocale */
@@ -34,14 +34,17 @@ r.post('/send', requireAuth, limitSend, ah(async (req, res) => {
 
   const toUser = await db.get(
     `SELECT id, name, fcm_token FROM users WHERE phone = ? AND role = 'user' AND status = 'active'`, [to]);
-  if (!toUser) return res.status(404).json({ error: 'Ce numéro n\'a pas encore MboteCall — invite-le 💚' });
-  if (toUser.id === req.user.id) return res.status(400).json({ error: 'Tu ne peux pas t\'envoyer une note à toi-même 😄' });
+  if (!toUser) return res.status(404).json({ error: 'Ce numéro n\'a pas de compte MboteCall' });
+  if (toUser.id === req.user.id) return res.status(400).json({ error: 'Impossible de s\'envoyer une note à soi-même' });
 
   const audio = String(req.body.audio || '');
-  if (!audio.startsWith('data:audio/')) return res.status(400).json({ error: 'Audio manquant' });
-  if (audio.length > 450_000) return res.status(400).json({ error: 'Note trop longue — reste sous 60 secondes' });
+  if (!audio.startsWith('data:audio/')) return res.status(400).json({ error: 'Enregistrement manquant' });
+  if (audio.length > 450_000) return res.status(400).json({ error: 'Note vocale trop longue (60 secondes maximum)' });
 
   const dur = Math.max(1, Math.min(90, parseInt(req.body.duration_sec, 10) || 1));
+  // forme d'onde : une chaîne de chiffres 0-9 (≈ 40 valeurs) pour dessiner le lecteur
+  const waveRaw = String(req.body.wave || '').replace(/[^0-9]/g, '').slice(0, 64);
+  const wave = waveRaw.length >= 8 ? waveRaw : null;
   const lf = OK_LANGS.includes(req.body.lang_from) ? req.body.lang_from : 'fr';
   const lt = OK_LANGS.includes(req.body.lang_to) ? req.body.lang_to : 'ln';
 
@@ -59,9 +62,9 @@ r.post('/send', requireAuth, limitSend, ah(async (req, res) => {
   const id = uid('vn');
   try {
     await db.run(
-      `INSERT INTO voice_notes(id, from_id, to_id, audio, duration_sec, lang_from, lang_to, status, created_at, client_id)
-       VALUES(?,?,?,?,?,?,?,?,?,?)`,
-      [id, req.user.id, toUser.id, audio, dur, lf, lt, priv ? 'no_ai' : 'pending', now(), clientId]);
+      `INSERT INTO voice_notes(id, from_id, to_id, audio, duration_sec, lang_from, lang_to, status, created_at, client_id, wave)
+       VALUES(?,?,?,?,?,?,?,?,?,?,?)`,
+      [id, req.user.id, toUser.id, audio, dur, lf, lt, priv ? 'no_ai' : 'pending', now(), clientId, wave]);
   } catch (e) {
     const again = clientId && await db.get(
       `SELECT id, status FROM voice_notes WHERE from_id = ? AND client_id = ?`,
@@ -75,22 +78,22 @@ r.post('/send', requireAuth, limitSend, ah(async (req, res) => {
 
   // ⚡ Instantané (app ouverte) puis 🔔 push (app fermée comprise)
   require('./rtc.ws').notifyMessage(to, {
-    kind: 'message', from_phone: req.user.phone, from_name: req.user.name || '', msg_id: id,
-    preview: '🎤 Note vocale',
+    kind: 'message', mtype: 'voice', from_phone: req.user.phone, from_name: req.user.name || '', msg_id: id,
+    preview: `Note vocale · ${Math.floor(dur / 60)}:${String(dur % 60).padStart(2, '0')}`,
   });
   try {
     const push = require('../services/push');
     if (push.enabled() && toUser.fcm_token) {
       push.sendInfoPush(toUser.fcm_token,
         req.user.name || req.user.phone,
-        'Note vocale — touche pour écouter', {
+        `Note vocale · ${Math.floor(dur / 60)}:${String(dur % 60).padStart(2, '0')}`, {
           kind: 'message', from_phone: req.user.phone,
           from_name: req.user.name || '', msg_id: id,
         });
     }
   } catch (_) {}
 
-  console.log(`🗣️ [LOKOTA] Note ${id} : ${req.user.phone} → ${to} (${lf} → ${lt}, ${dur}s)`);
+  console.log(`[LOKOTA] Note ${id} : ${req.user.phone} → ${to} (${lf} → ${lt}, ${dur}s)`);
   res.json({ id, status: priv ? 'no_ai' : 'pending', lokota_mode: lokota.mode() });
 }));
 

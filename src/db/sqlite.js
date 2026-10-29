@@ -175,6 +175,19 @@ const MIGRATIONS = [
   `ALTER TABLE voice_notes ADD COLUMN client_id TEXT`,
   `CREATE UNIQUE INDEX IF NOT EXISTS idx_tm_client ON text_messages(from_id, client_id)`,
   `CREATE UNIQUE INDEX IF NOT EXISTS idx_vn_client ON voice_notes(from_id, client_id)`,
+  // 📎 v3.1 : pièces jointes (nom, type, taille), forme d'onde et écoute des vocaux
+  `ALTER TABLE text_messages ADD COLUMN att_name TEXT`,
+  `ALTER TABLE text_messages ADD COLUMN att_mime TEXT`,
+  `ALTER TABLE text_messages ADD COLUMN att_size INTEGER`,
+  `ALTER TABLE voice_notes ADD COLUMN wave TEXT`,
+  `ALTER TABLE voice_notes ADD COLUMN played_at INTEGER`,
+  // 🗑️ v3.1 : « supprimer pour moi » — masque un message pour UN utilisateur
+  `CREATE TABLE IF NOT EXISTS msg_hidden (
+     user_id TEXT NOT NULL,
+     msg_id  TEXT NOT NULL,
+     at      INTEGER NOT NULL,
+     PRIMARY KEY (user_id, msg_id)
+   )`,
 ];
 
 let db;

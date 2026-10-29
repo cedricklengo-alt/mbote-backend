@@ -173,6 +173,17 @@ ALTER TABLE text_messages ADD COLUMN IF NOT EXISTS client_id TEXT;
 ALTER TABLE voice_notes ADD COLUMN IF NOT EXISTS client_id TEXT;
 CREATE UNIQUE INDEX IF NOT EXISTS idx_tm_client ON text_messages(from_id, client_id);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_vn_client ON voice_notes(from_id, client_id);
+ALTER TABLE text_messages ADD COLUMN IF NOT EXISTS att_name TEXT;
+ALTER TABLE text_messages ADD COLUMN IF NOT EXISTS att_mime TEXT;
+ALTER TABLE text_messages ADD COLUMN IF NOT EXISTS att_size INTEGER;
+ALTER TABLE voice_notes ADD COLUMN IF NOT EXISTS wave TEXT;
+ALTER TABLE voice_notes ADD COLUMN IF NOT EXISTS played_at BIGINT;
+CREATE TABLE IF NOT EXISTS msg_hidden (
+  user_id TEXT NOT NULL,
+  msg_id  TEXT NOT NULL,
+  at      BIGINT NOT NULL,
+  PRIMARY KEY (user_id, msg_id)
+);
 `;
 
 // Convertit les placeholders « ? » (style SQLite) en « $1, $2… » (style PG)

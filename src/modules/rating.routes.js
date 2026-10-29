@@ -30,7 +30,7 @@ r.get('/lookup', requireAuth, ah(async (req, res) => {
     `SELECT id FROM users WHERE phone = ? AND role = 'user' AND status = 'active'`, [phone]);
   if (toUser && toUser.id !== req.user.id) {
     return res.json({
-      destination: 'MboteCall', flag: '💚',
+      destination: 'MboteCall', flag: '',
       price_per_min_cents: 0, free_reason: 'mbote', max_minutes: 240,
     });
   }

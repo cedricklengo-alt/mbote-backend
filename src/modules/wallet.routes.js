@@ -82,7 +82,7 @@ r.post('/transfer', requireAuth, ah(async (req, res) => {
     return res.status(400).json({ error: 'Montant entre 0,50 $ et 500 $' });
 
   const dest = await db.get(`SELECT id, name, phone, status FROM users WHERE phone = ? AND role = 'user'`, [toPhone]);
-  if (!dest) return res.status(404).json({ error: 'Ce numéro n\'a pas encore de compte MboteCall — invite-le avec ton code parrain 🎁' });
+  if (!dest) return res.status(404).json({ error: 'Ce numéro n\'a pas encore de compte MboteCall — invite-le avec ton code parrain' });
   if (dest.status === 'blocked') return res.status(403).json({ error: 'Le compte du bénéficiaire est bloqué' });
 
   const { uid: mkId, now: ts } = require('../util');

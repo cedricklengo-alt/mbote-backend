@@ -277,8 +277,8 @@ async function processNote(id) {
     await db.run(
       `UPDATE voice_notes SET transcript = ?, translation = ?, status = 'done' WHERE id = ?`,
       [
-        `🧪 (démo) Transcription simulée de ta note en ${LANGS[note.lang_from] || note.lang_from}.`,
-        `🧪 (démo) Traduction simulée en ${LANGS[note.lang_to] || note.lang_to} — la vraie IA s'active avec une clé (gratuite : Groq/NVIDIA, voir guide).`,
+        `(démo) Transcription simulée de ta note en ${LANGS[note.lang_from] || note.lang_from}.`,
+        `(démo) Traduction simulée en ${LANGS[note.lang_to] || note.lang_to} — la vraie IA s'active avec une clé (gratuite : Groq/NVIDIA, voir guide).`,
         id,
       ]);
     console.log(`🗣️ [LOKOTA] Note ${id} traduite (simulation)`);
@@ -348,7 +348,7 @@ async function processMessage(id) {
     await new Promise((r) => setTimeout(r, 1200));
     await db.run(
       `UPDATE text_messages SET translation = ?, status = 'done' WHERE id = ?`,
-      [`🧪 (démo) Traduction simulée en ${LANGS[msg.lang_to] || msg.lang_to} — la vraie IA s'active avec une clé (voir guide).`, id]);
+      [`(démo) Traduction simulée en ${LANGS[msg.lang_to] || msg.lang_to} — la vraie IA s'active avec une clé (voir guide).`, id]);
     console.log(`💬 [MESSAGES] ${id} traduit (simulation)`);
     return;
   }

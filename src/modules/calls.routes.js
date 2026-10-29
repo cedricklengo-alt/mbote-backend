@@ -86,7 +86,7 @@ r.post('/start', requireAuth, ah(async (req, res) => {
   const toUser = await db.get(
     `SELECT id, name, avatar, fcm_token FROM users WHERE phone = ? AND role = 'user' AND status = 'active'`, [to]);
   if (!forceGsm && toUser && toUser.id !== req.user.id) {
-    price = 0; destination = 'MboteCall'; flag = '💚';
+    price = 0; destination = 'MboteCall'; flag = '';
     maxSec = FREE_CAP_SEC; freeReason = 'mbote';
     calleeName = toUser.name || null;
     calleeAvatar = toUser.avatar || null; // 📷 la photo de l'appelé s'affiche pendant l'appel

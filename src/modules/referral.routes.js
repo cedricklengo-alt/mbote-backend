@@ -24,11 +24,11 @@ r.post('/invite', requireAuth, ah(async (req, res) => {
     return res.status(400).json({ error: 'Numéro invalide (format +243…)' });
   }
   if (phone === req.user.phone) {
-    return res.status(400).json({ error: 'C\'est ton propre numéro 😄' });
+    return res.status(400).json({ error: 'C\'est ton propre numéro' });
   }
   const existing = await db.get(`SELECT id FROM users WHERE phone = ?`, [phone]);
   if (existing) {
-    return res.status(400).json({ error: 'Ce numéro est déjà sur MboteCall 🎉' });
+    return res.status(400).json({ error: 'Ce numéro est déjà sur MboteCall' });
   }
   const dup = await db.get(
     `SELECT id FROM invites WHERE user_id = ? AND phone = ?`,

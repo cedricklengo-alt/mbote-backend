@@ -231,7 +231,7 @@ r.post('/pin-reset/verify', requireAuth, ah(async (req, res) => {
   try {
     const push = require('../services/push');
     if (push.enabled() && req.user.fcm_token) {
-      push.sendInfoPush(req.user.fcm_token, '🔐 Code PIN réinitialisé',
+      push.sendInfoPush(req.user.fcm_token, 'Code PIN réinitialisé',
         'Le verrou de ton app MboteCall vient d\'être réinitialisé. Si ce n\'est pas toi, contacte le support.');
     }
   } catch (_) {}
