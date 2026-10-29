@@ -73,6 +73,13 @@ r.post('/send', requireAuth, limitSend, ah(async (req, res) => {
         kind: 'message', from: req.user.phone,
         from_name: req.user.name || '', msg_id: id,
       });
+      console.log(`🔔 [PUSH] Notification message envoyée → ${to}`);
+    } else if (!push.enabled()) {
+      // 🔎 Diagnostic : le service push n'est pas actif sur ce serveur
+      console.log(`🔕 [PUSH] Non envoyé → ${to} : service push DÉSACTIVÉ (FIREBASE_SERVICE_ACCOUNT ?)`);
+    } else {
+      // 🔎 Diagnostic : ce destinataire ne s'est jamais enregistré pour les push
+      console.log(`🔕 [PUSH] Non envoyé → ${to} : AUCUN jeton FCM (son app ne s'est pas enregistrée)`);
     }
   } catch (_) {}
 

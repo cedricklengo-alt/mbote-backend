@@ -138,6 +138,8 @@ r.post('/fcm-token', requireAuth, ah(async (req, res) => {
   const token = String(req.body.token || '').slice(0, 4096);
   await db.run('UPDATE users SET fcm_token = ? WHERE id = ?',
     [token || null, req.user.id]);
+  // 🔎 Diagnostic notifications : confirme que CE téléphone s'est bien enregistré
+  console.log(`📲 [PUSH] Jeton FCM ${token ? 'enregistré' : 'EFFACÉ'} pour ${req.user.phone} (${String(token).slice(0, 14)}…)`);
   res.json({ ok: true });
 }));
 
