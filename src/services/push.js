@@ -82,6 +82,43 @@ async function sendCallPush(token, fromName, fromPhone) {
 }
 
 /**
+ * 📵 v2.9.1 — Appel manqué : REMPLACE la notification « t'appelle »
+ * (même tag "mbote-call") pour ne jamais laisser une fausse sonnerie
+ * dans la barre. Toucher la notification ouvre la conversation avec
+ * la personne (kind=message → navigation déjà en place dans l'app).
+ */
+async function sendMissedCallPush(token, fromName, fromPhone) {
+  if (fake) {
+    console.log(`🧪 [SIMULATION] push appel manqué de ${fromPhone}`);
+    return true;
+  }
+  if (!messaging || !token) return false;
+  try {
+    await messaging.send({
+      token,
+      android: {
+        priority: 'high',
+        ttl: 3600000,
+        notification: { priority: 'high', tag: 'mbote-call' },
+      },
+      notification: {
+        title: '📵 Appel manqué',
+        body: `${fromName || fromPhone} a essayé de te joindre`,
+      },
+      data: {
+        kind: 'message', // toucher → ouvre le fil avec la personne
+        from_phone: String(fromPhone),
+        from_name: String(fromName || ''),
+      },
+    });
+    return true;
+  } catch (e) {
+    console.error('⚠️ Envoi push appel manqué KO :', e.message);
+    return false;
+  }
+}
+
+/**
  * ℹ️ Notification d'information (ex. alerte sécurité « PIN réinitialisé »)
  */
 async function sendInfoPush(token, title, body, data) {
@@ -117,4 +154,4 @@ async function sendInfoPush(token, title, body, data) {
   }
 }
 
-module.exports = { init, enabled, sendCallPush, sendInfoPush };
+module.exports = { init, enabled, sendCallPush, sendMissedCallPush, sendInfoPush };
