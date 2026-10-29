@@ -11,3 +11,12 @@ services:
         generateValue: true          # secret généré automatiquement par Render
       - key: DEMO_MODE
         value: "true"
+      # 🔔 v3.0 — à renseigner dans le tableau de bord Render (Environment) :
+      - key: FIREBASE_SERVICE_ACCOUNT   # clé de compte de service Firebase (JSON) — réveil de l'app fermée
+        sync: false
+      - key: METERED_SUBDOMAIN          # relais TURN (appels sur tous les réseaux)
+        sync: false
+      - key: METERED_API_KEY
+        sync: false
+      - key: ADMIN_PASSWORD             # changez le mot de passe admin
+        sync: false

@@ -169,6 +169,10 @@ ALTER TABLE text_messages ADD COLUMN IF NOT EXISTS deleted INTEGER DEFAULT 0;
 ALTER TABLE voice_notes ADD COLUMN IF NOT EXISTS deleted INTEGER DEFAULT 0;
 ALTER TABLE text_messages ADD COLUMN IF NOT EXISTS delivered_at BIGINT;
 ALTER TABLE voice_notes ADD COLUMN IF NOT EXISTS delivered_at BIGINT;
+ALTER TABLE text_messages ADD COLUMN IF NOT EXISTS client_id TEXT;
+ALTER TABLE voice_notes ADD COLUMN IF NOT EXISTS client_id TEXT;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_tm_client ON text_messages(from_id, client_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_vn_client ON voice_notes(from_id, client_id);
 `;
 
 // Convertit les placeholders « ? » (style SQLite) en « $1, $2… » (style PG)

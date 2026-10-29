@@ -136,6 +136,12 @@ r.put('/me', requireAuth, ah(async (req, res) => {
  * ce téléphone quand quelqu'un l'appelle et que l'app est fermée. */
 r.post('/fcm-token', requireAuth, ah(async (req, res) => {
   const token = String(req.body.token || '').slice(0, 4096);
+  // 📱 Un jeton = UN téléphone = UN compte : si ce téléphone change de compte,
+  // l'ancien compte ne doit plus recevoir ses notifications (confidentialité).
+  if (token) {
+    await db.run('UPDATE users SET fcm_token = NULL WHERE fcm_token = ? AND id != ?',
+      [token, req.user.id]);
+  }
   await db.run('UPDATE users SET fcm_token = ? WHERE id = ?',
     [token || null, req.user.id]);
   // 🔎 Diagnostic notifications : confirme que CE téléphone s'est bien enregistré

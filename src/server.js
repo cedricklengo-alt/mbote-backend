@@ -10,7 +10,10 @@ const path = require('path');
 const db = require('./db');
 
 const app = express();
-app.use(express.json({ limit: '500kb' })); // 500 kb : photos de profil compressées
+// 🌐 Derrière le répartiteur de charge Render : sans ceci, req.ip = l'IP du
+// répartiteur pour TOUT LE MONDE → un seul quota partagé par tous les utilisateurs.
+app.set('trust proxy', 1);
+app.use(express.json({ limit: '1mb' })); // photos / notes vocales compressées
 
 /* 🛡️ Sécurité — en-têtes de protection navigateur + limite globale anti-inondation */
 const { rateLimit } = require('./middleware/ratelimit');
@@ -24,7 +27,16 @@ app.use((req, res, next) => {
   });
   next();
 });
-app.use(rateLimit({ windowMs: 60_000, max: 300 })); // 300 req/min par adresse
+// 300 req/min : par UTILISATEUR connecté (empreinte du jeton), sinon par adresse IP
+const crypto = require('crypto');
+app.use(rateLimit({
+  windowMs: 60_000, max: 300,
+  key: (req) => {
+    const h = req.headers.authorization;
+    return h ? 'tok:' + crypto.createHash('sha1').update(h).digest('hex').slice(0, 16)
+             : 'ip:' + req.ip;
+  },
+}));
 
 // Journal des requêtes (diagnostic)
 app.use((req, res, next) => {
@@ -64,6 +76,7 @@ app.get('/', (req, res) => res.redirect('/admin'));
 /* ---- Santé ---- */
 app.get('/api/health', (req, res) => res.json({
   ok: true, service: 'mbote-backend', db: db.name,
+  push: require('./services/push').enabled(),
   demo_mode: String(process.env.DEMO_MODE || 'true') === 'true',
 }));
 
@@ -73,11 +86,18 @@ app.use((err, req, res, next) => {
   res.status(500).json({ error: 'Erreur interne' });
 });
 
+// 🛟 Une promesse oubliée ne doit JAMAIS faire tomber le serveur (et couper tous les appels)
+process.on('unhandledRejection', (e) => console.error('💥 Promesse non gérée :', e && e.message || e));
+process.on('uncaughtException', (e) => console.error('💥 Exception non gérée :', e && e.stack || e));
+
 const PORT = process.env.PORT || 4000;
 db.init().then(() => {
   const http = require('http');
   const server = http.createServer(app);
-  require('./services/push').init(); // 🔔 notifications d'appel (Firebase)
+  const push = require('./services/push');
+  // 🧹 FCM dit qu'un jeton est mort → on l'efface (plus de réveils envoyés dans le vide)
+  push.setInvalidTokenHandler((tk) => db.run('UPDATE users SET fcm_token = NULL WHERE fcm_token = ?', [tk]));
+  push.init(); // 🔔 notifications d'appel (Firebase)
   require('./modules/rtc.ws').init(server); // 🎙️ appels voix temps réel
   require('./services/retention').start(); // 🧹 v2.2 purge auto des contenus livrés
   server.listen(PORT, '0.0.0.0', () => {

@@ -87,4 +87,34 @@ r.get('/ice', requireAuth, ah(async (req, res) => {
   res.json({ iceServers: servers, turn: false });
 }));
 
+/* ──────────────────────────────────────────────────────────────
+ * 📲 v3.0 — Réveil d'appel quand l'app était FERMÉE.
+ * Le téléphone, réveillé par notification, n'a pas encore de WebSocket :
+ * il confirme / refuse l'appel par simple requête HTTP.
+ * ────────────────────────────────────────────────────────────── */
+
+/** « Ça sonne chez moi » — le push a bien réveillé l'app. */
+r.post('/ack', requireAuth, ah(async (req, res) => {
+  const ok = require('./rtc.ws').ackCall(req.user.phone, req.body && req.body.call_id);
+  res.json({ ok });
+}));
+
+/** « Je refuse » — depuis l'écran d'appel plein écran (app sans connexion). */
+r.post('/decline', requireAuth, ah(async (req, res) => {
+  const ok = require('./rtc.ws').declineCall(req.user.phone, req.body && req.body.call_id);
+  res.json({ ok });
+}));
+
+/* 🧪 Diagnostic — UNIQUEMENT en mode simulation (tests automatisés locaux) */
+if (String(process.env.PUSH_DEBUG_FAKE || '') === 'true') {
+  r.get('/_debug', (req, res) => {
+    const push = require('../services/push');
+    res.json({ rtc: require('./rtc.ws')._debug(), pushes: push.getSentLog() });
+  });
+  r.post('/_debug/clear', (req, res) => {
+    require('../services/push').clearSentLog();
+    res.json({ ok: true });
+  });
+}
+
 module.exports = r;

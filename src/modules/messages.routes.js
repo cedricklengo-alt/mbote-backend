@@ -53,27 +53,58 @@ r.post('/send', requireAuth, limitSend, ah(async (req, res) => {
   // 🔒 v2.2 Mode privé (translate:false) : contenu jamais envoyé à l'IA
   const sameLang = lf === lt || req.body.translate === false;
 
+  // 🔁 v3.0 : clé d'idempotence fournie par l'app (réutilisée à chaque renvoi).
+  // Si la 1re requête a bien été reçue mais que la réponse s'est perdue
+  // (réseau lent), le renvoi ne crée PAS de second message.
+  const clientId = String(req.body.client_id || '').trim().slice(0, 64) || null;
+  if (clientId) {
+    const dup = await db.get(
+      `SELECT id, status FROM text_messages WHERE from_id = ? AND client_id = ?`,
+      [req.user.id, clientId]);
+    if (dup) {
+      return res.json({ id: dup.id, status: dup.status, lokota_mode: lokota.mode(), duplicate: true });
+    }
+  }
+
   const id = uid('tm');
   const needsAi = !sameLang && text.length > 0; // photo seule : rien à traduire
-  await db.run(
-    `INSERT INTO text_messages(id, from_id, to_id, body, lang_from, lang_to, status, created_at, attachment, attachment_type)
-     VALUES(?,?,?,?,?,?,?,?,?,?)`,
-    [id, req.user.id, toUser.id, text, lf, lt, needsAi ? 'pending' : 'done', now(),
-     attachment || null, attachment ? 'image' : null]);
+  try {
+    await db.run(
+      `INSERT INTO text_messages(id, from_id, to_id, body, lang_from, lang_to, status, created_at, attachment, attachment_type, client_id)
+       VALUES(?,?,?,?,?,?,?,?,?,?,?)`,
+      [id, req.user.id, toUser.id, text, lf, lt, needsAi ? 'pending' : 'done', now(),
+       attachment || null, attachment ? 'image' : null, clientId]);
+  } catch (e) {
+    // Deux envois simultanés avec la même clé : le second retrouve le premier
+    const again = clientId && await db.get(
+      `SELECT id, status FROM text_messages WHERE from_id = ? AND client_id = ?`,
+      [req.user.id, clientId]);
+    if (again) {
+      return res.json({ id: again.id, status: again.status, lokota_mode: lokota.mode(), duplicate: true });
+    }
+    throw e;
+  }
 
   // 🧠 Traduction en tâche de fond (seulement si les langues diffèrent)
   if (needsAi) setImmediate(() => lokota.processMessage(id).catch(() => {}));
+
+  // ⚡ Instantané : si son app est ouverte, elle est prévenue par le canal temps réel
+  // (indépendant de Firebase → le message apparaît tout de suite)
+  const preview = attachment ? '📷 Photo' : (text.length > 60 ? text.slice(0, 57) + '…' : text);
+  const live = require('./rtc.ws').notifyMessage(to, {
+    kind: 'message', from_phone: req.user.phone, from_name: req.user.name || '', msg_id: id,
+    preview,
+  });
 
   // 🔔 Prévenir le destinataire (app fermée comprise)
   try {
     const push = require('../services/push');
     if (push.enabled() && toUser.fcm_token) {
-      const preview = attachment ? '📷 Photo' : (text.length > 60 ? text.slice(0, 57) + '…' : text);
-      push.sendInfoPush(toUser.fcm_token, `💬 ${req.user.name || req.user.phone}`, preview, {
+      push.sendInfoPush(toUser.fcm_token, req.user.name || req.user.phone, preview, {
         kind: 'message', from_phone: req.user.phone,
         from_name: req.user.name || '', msg_id: id,
       });
-      console.log(`🔔 [PUSH] Notification message envoyée → ${to}`);
+      console.log(`🔔 [PUSH] Notification message envoyée → ${to}${live ? ' (+ temps réel)' : ''}`);
     } else if (!push.enabled()) {
       // 🔎 Diagnostic : le service push n'est pas actif sur ce serveur
       console.log(`🔕 [PUSH] Non envoyé → ${to} : service push DÉSACTIVÉ (FIREBASE_SERVICE_ACCOUNT ?)`);

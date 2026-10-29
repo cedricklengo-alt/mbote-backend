@@ -170,6 +170,11 @@ const MIGRATIONS = [
   `ALTER TABLE voice_notes ADD COLUMN deleted INTEGER DEFAULT 0`,
   `ALTER TABLE text_messages ADD COLUMN delivered_at INTEGER`,
   `ALTER TABLE voice_notes ADD COLUMN delivered_at INTEGER`,
+  // 🔁 v3.0 : clé d'idempotence — un renvoi après timeout ne crée plus de doublon
+  `ALTER TABLE text_messages ADD COLUMN client_id TEXT`,
+  `ALTER TABLE voice_notes ADD COLUMN client_id TEXT`,
+  `CREATE UNIQUE INDEX IF NOT EXISTS idx_tm_client ON text_messages(from_id, client_id)`,
+  `CREATE UNIQUE INDEX IF NOT EXISTS idx_vn_client ON voice_notes(from_id, client_id)`,
 ];
 
 let db;

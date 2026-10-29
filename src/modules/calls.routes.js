@@ -191,12 +191,19 @@ r.post('/log-incoming', requireAuth, ah(async (req, res) => {
   const from = normalizePhone(req.body.from);
   if (!from) return res.status(400).json({ error: 'Numéro invalide' });
   const billed = Math.max(0, Math.min(86400, parseInt(req.body.billed_sec, 10) || 0));
+  // 🔁 v3.0 : identifiant déterministe → un même appel n'est journalisé qu'UNE fois,
+  // quel que soit le nombre de chemins qui le signalent (écran, notification, renvoi).
+  const callId = String(req.body.call_id || '').replace(/[^\w\-]/g, '').slice(0, 80);
+  const id = callId ? `in_${req.user.id}_${callId}` : uid('ca');
+  const cause = billed > 0 ? 'remote_hangup'
+    : (req.body.cause === 'declined' ? 'declined' : 'missed');
   await db.run(
     `INSERT INTO calls(id,user_id,callee,destination,price_per_min_cents,max_sec,status,started_at,ended_at,billed_sec,cost_cents,hangup_cause,direction)
-     VALUES(?,?,?,?,0,0,'ended',?,?,?,0,?,'in')`,
-    [uid('ca'), req.user.id, from, 'MboteCall',
-     now() - billed * 1000, now(), billed,
-     billed > 0 ? 'remote_hangup' : 'missed']);
+     VALUES(?,?,?,?,0,0,'ended',?,?,?,0,?,'in')
+     ON CONFLICT(id) DO UPDATE SET billed_sec = CASE WHEN excluded.billed_sec > calls.billed_sec THEN excluded.billed_sec ELSE calls.billed_sec END,
+                                   hangup_cause = CASE WHEN excluded.billed_sec > calls.billed_sec THEN excluded.hangup_cause ELSE calls.hangup_cause END`,
+    [id, req.user.id, from, 'MboteCall',
+     now() - billed * 1000, now(), billed, cause]);
   res.json({ ok: true });
 }));
 

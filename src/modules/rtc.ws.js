@@ -1,95 +1,75 @@
 /**
- * 🎙️ RTC — signalisation temps réel pour les VRAIS appels voix
- * MboteCall → MboteCall (WebRTC).
+ * 🎙️ RTC — signalisation temps réel des appels voix MboteCall → MboteCall.
+ * v3.0 — « standardiste » complet.
  *
- * Le serveur joue le rôle de standardiste : il ne transporte PAS la voix
- * (elle passe en direct de téléphone à téléphone via WebRTC) ; il fait
- * seulement passer les messages techniques entre les deux applications :
+ * La voix ne passe PAS par ce serveur (WebRTC direct de téléphone à
+ * téléphone). Le serveur fait passer les messages techniques ET garantit que
+ * le téléphone appelé SONNE, quel que soit son état :
  *
- *   offer   : A appelle B (contient l'offre SDP)
- *   answer  : B décroche (contient la réponse SDP)
- *   ice     : candidats réseau (comment se joindre à travers box/4G)
- *   reject  : B refuse l'appel
- *   hangup  : l'un des deux raccroche
+ *   app ouverte        → l'offre arrive par WebSocket ;
+ *   app en arrière-plan→ offre par WebSocket + réveil par push (data-only) ;
+ *   app fermée         → réveil par push, l'offre attend en « salle
+ *                        d'attente » et est livrée dès que l'app se connecte ;
+ *   socket fantôme     → (Android tue l'app sans fermer la connexion) pas de
+ *                        « ringing » sous 4,5 s → on bascule sur le push ;
+ *   push sans effet    → pas d'acquittement sous 5 s → notification visible.
  *
- * Connexion : wss://<serveur>/ws?token=<JWT>   (même jeton que l'API)
+ * Messages client → serveur :
+ *   offer · answer · ice · ringing · reject · hangup · reoffer · reanswer
+ *   presence {state:'fg'|'bg'}   l'app est-elle au premier plan ?
+ *   ping                         → réponse « pong » (test de vie)
+ *   typing {to}                  « écrit… » (messagerie)
+ *
+ * Messages serveur → client (en plus du relais) :
+ *   push-sent · peer-offline · pong · typing · msg
+ *
+ * Connexion : wss://<serveur>/ws?token=<JWT>
  */
 
 const WebSocket = require('ws');
 const db = require('../db');
 const { normalizePhone } = require('../util');
-const { verifyToken } = require('../middleware/auth'); // 🔄 double clé (rotation)
+const { verifyToken } = require('../middleware/auth');
 const push = require('../services/push');
 
-/** téléphone (normalisé) → { ws, user } */
+/** téléphone → { ws, user, fg, fgAt } */
 const online = new Map();
 
-/**
- * 📥 Salle d'attente des appels (app fermée chez l'appelé).
- * Quand B est hors ligne mais joignable par notification : on garde l'offre
- * de A ici, on envoie le push, et dès que B ouvre l'app (connexion WS),
- * l'appel lui est livré comme s'il venait d'arriver.
- * téléphone appelé → { offer, ice: [], caller, ts }
- */
-const pending = new Map();
-const PENDING_TTL = 50_000; // 50 s : au-delà, l'appelant a déjà raccroché
+/** call_id → appel suivi par le standardiste */
+const calls = new Map();
 
-/**
- * 👻 v2.9.1 — Garde anti-socket fantôme.
- * Android peut tuer l'app SANS fermer la connexion : le serveur croit
- * l'appelé « en ligne », lui transmet l'offre… dans le vide, et l'appelant
- * finit sur « Pas de réponse » alors qu'une notification l'aurait réveillé.
- * Parade : après avoir transmis une offre, on exige le « ringing » de
- * l'appelé sous 4,5 s. Sinon : connexion fantôme → on la ferme et on
- * bascule sur la voie notification (salle d'attente), ICE rejoués.
- * téléphone appelé → { timer, caller, msg, ice: [] }
- */
-const awaitingRing = new Map();
+const RING_TTL = Number(process.env.RTC_RING_TTL_MS) || 55_000; // un appel sonne 55 s au maximum (réglable pour les tests)
+const GHOST_MS = 4_500;         // pas de « ringing » sous 4,5 s → socket fantôme
+const WAKE_ACK_MS = 5_000;      // pas d'acquittement du push sous 5 s → renfort visible
+const CALLER_GONE_MS = 8_000;   // l'appelant a disparu → on arrête de sonner
+const ENDED_KEEP_MS = 60_000;   // mémoire d'un appel terminé (ignore les signaux tardifs)
+const ANSWERED_MAX_MS = 5 * 3600_000;
+const MAX_CALL_ICE = 80;
 
-function armGhostGuard(callerWs, callerUser, to, msg) {
-  const old = awaitingRing.get(to);
-  if (old) clearTimeout(old.timer);
-  const guard = { caller: callerUser.phone, ice: [] };
-  guard.timer = setTimeout(async () => {
-    awaitingRing.delete(to);
-    if (callerWs.readyState !== WebSocket.OPEN) return; // l'appelant est parti
-    // Pas de « ça sonne » → connexion fantôme : on la ferme proprement
-    const cur = online.get(to);
-    if (cur) {
-      try { cur.ws.terminate(); } catch (_) {}
-      online.delete(to);
-    }
-    console.log(`👻 WS fantôme chez ${to} → bascule sur notification push`);
-    await handleOffline(callerWs, callerUser, 'offer', to, msg);
-    // 🧊 Les candidats réseau émis pendant la fenêtre fantôme sont rejoués
-    const p = pending.get(to);
-    if (p) for (const c of guard.ice) p.ice.push(c);
-  }, 4500);
-  awaitingRing.set(to, guard);
-}
+const log = (...a) => console.log(...a);
+const warn = (...a) => console.error(...a);
 
-/** L'appelé a donné signe de vie (ringing/answer/reject) → garde levée */
-function clearGhostGuard(calleePhone) {
-  const g = awaitingRing.get(calleePhone);
-  if (g) { clearTimeout(g.timer); awaitingRing.delete(calleePhone); }
-}
+/* ───────────── Utilitaires ───────────── */
 
-/**
- * 📵 v2.9.1 — L'appel en salle d'attente n'aboutira pas (annulé ou expiré) :
- * on REMPLACE la notification « t'appelle » par « Appel manqué » (même tag),
- * pour ne jamais laisser une fausse sonnerie dans la barre du téléphone.
- */
-async function notifyMissed(to, p) {
+function send(ws, obj) {
   try {
-    const callee = await db.get(
-      `SELECT fcm_token FROM users WHERE phone = ? AND status = 'active'`, [to]
-    );
-    if (push.enabled() && callee && callee.fcm_token) {
-      await push.sendMissedCallPush(
-        callee.fcm_token, p.offer.from_name, p.caller);
-      console.log(`📵 Appel manqué notifié : ${p.caller} → ${to}`);
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify(obj));
+      return true;
     }
-  } catch (_) {}
+  } catch (_) { /* socket mourante */ }
+  return false;
+}
+
+function sendTo(phone, obj) {
+  const e = online.get(phone);
+  return e ? send(e.ws, obj) : false;
+}
+
+async function getUser(phone) {
+  return db.get(
+    `SELECT id, name, fcm_token FROM users WHERE phone = ? AND status = 'active'`,
+    [phone]);
 }
 
 /** L'utilisateur est-il connecté au canal temps réel ? */
@@ -98,185 +78,444 @@ function isOnline(phone) {
   return !!(p && online.has(p));
 }
 
+/* 🛡️ Anti-abus : chaque offre déclenche un push chez l'appelé */
+const offerBuckets = new Map(); // téléphone → { n, reset }
+function allowOffer(phone) {
+  const t = Date.now();
+  let b = offerBuckets.get(phone);
+  if (!b || t > b.reset) { b = { n: 0, reset: t + 60_000 }; offerBuckets.set(phone, b); }
+  return ++b.n <= 12; // 12 appels / minute / numéro
+}
+
+/* ───────────── Cycle de vie d'un appel ───────────── */
+
+function clearTimers(call) {
+  clearTimeout(call.ghostTimer);
+  clearTimeout(call.wakeTimer);
+  clearTimeout(call.ttlTimer);
+  call.ghostTimer = call.wakeTimer = call.ttlTimer = null;
+}
+
+/** Appel terminé (quelle qu'en soit la raison) : on garde une trace brève */
+function finish(call) {
+  if (call.state === 'ended') return;
+  call.state = 'ended';
+  call.endedAt = Date.now();
+  call.ice = [];
+  call.offerMsg = null; // libère le SDP / la photo
+  clearTimers(call);
+}
+
+/** L'appelé a donné signe de vie : plus de doute, plus de renfort */
+function onRingAck(call) {
+  if (call.state !== 'ringing' || call.ringAck) return;
+  call.ringAck = true;
+  clearTimeout(call.ghostTimer);
+  clearTimeout(call.wakeTimer);
+  call.ghostTimer = call.wakeTimer = null;
+  sendTo(call.caller, { type: 'ringing', call_id: call.id, from: call.callee });
+}
+
+/**
+ * 📲 Réveille le téléphone de l'appelé par notification (data-only).
+ * Si l'app ne confirme pas sous 5 s → notification VISIBLE en renfort.
+ * → true si un push est parti (ou l'était déjà).
+ */
+async function wake(call) {
+  if (call.pushSent) return true;
+  if (!push.enabled()) return false;
+  const callee = await getUser(call.callee);
+  if (!callee || !callee.fcm_token || call.state !== 'ringing') return false;
+  const info = { callId: call.id, fromName: call.callerName, fromPhone: call.caller };
+  const ok = await push.sendCallPush(callee.fcm_token, info);
+  if (!ok) return false;
+  call.pushSent = true;
+  log(`📲 Réveil push → ${call.callee} (appel ${call.id})`);
+  call.wakeTimer = setTimeout(async () => {
+    call.wakeTimer = null;
+    if (call.state !== 'ringing' || call.ringAck) return;
+    try {
+      const c = await getUser(call.callee);
+      if (c && c.fcm_token && call.state === 'ringing' && !call.ringAck) {
+        await push.sendCallFallbackPush(c.fcm_token, info);
+        call.fallbackSent = true;
+        log(`🔔 Pas d'acquittement → notification visible → ${call.callee}`);
+      }
+    } catch (_) {}
+  }, WAKE_ACK_MS);
+  if (call.wakeTimer.unref) call.wakeTimer.unref();
+  return true;
+}
+
+/** 👻 L'appelé a un socket qui ne répond pas → on le ferme et on passe au push */
+function armGhostGuard(call) {
+  clearTimeout(call.ghostTimer);
+  call.ghostTimer = setTimeout(async () => {
+    call.ghostTimer = null;
+    if (call.state !== 'ringing' || call.ringAck) return;
+    const cur = online.get(call.callee);
+    if (cur) {
+      try { cur.ws.terminate(); } catch (_) {}
+      online.delete(call.callee);
+    }
+    log(`👻 WS fantôme chez ${call.callee} → bascule sur notification push`);
+    call.delivered = false;
+    const ok = await wake(call);
+    if (call.state !== 'ringing') return;
+    if (ok) {
+      sendTo(call.caller, { type: 'push-sent', call_id: call.id });
+    } else {
+      finish(call);
+      sendTo(call.caller, { type: 'peer-offline', call_id: call.id });
+    }
+  }, GHOST_MS);
+  if (call.ghostTimer.unref) call.ghostTimer.unref();
+}
+
+/**
+ * 🚫 Fait disparaître l'écran d'appel chez l'appelé (push d'annulation) et
+ * laisse « Appel manqué » dans sa barre. Seulement si on l'avait réveillé.
+ */
+async function notifyCancelled(call) {
+  if (!call.pushSent) return;
+  try {
+    const callee = await getUser(call.callee);
+    if (!callee || !callee.fcm_token) return;
+    await push.sendCallCancelPush(callee.fcm_token,
+      { callId: call.id, fromPhone: call.caller, reason: 'cancel' });
+    await push.sendMissedCallPush(callee.fcm_token, call.callerName, call.caller);
+    log(`📵 Appel manqué notifié : ${call.caller} → ${call.callee}`);
+  } catch (_) {}
+}
+
+/** L'appelant renonce (hangup, déconnexion…) pendant que ça sonne */
+function cancelByCaller(call, reason) {
+  if (call.state !== 'ringing') return;
+  finish(call);
+  sendTo(call.callee, {
+    type: 'hangup', call_id: call.id, from: call.caller, reason: reason || 'cancel',
+  });
+  notifyCancelled(call).catch(() => {});
+  log(`🧹 Appel annulé (${reason || 'hangup'}) : ${call.caller} → ${call.callee}`);
+}
+
+/** Personne n'a décroché dans le délai */
+function expireCall(call) {
+  if (call.state !== 'ringing') return;
+  finish(call);
+  sendTo(call.callee, { type: 'hangup', call_id: call.id, from: call.caller, reason: 'timeout' });
+  sendTo(call.caller, { type: 'peer-offline', call_id: call.id });
+  notifyCancelled(call).catch(() => {});
+  log(`⌛ Appel expiré : ${call.caller} → ${call.callee}`);
+}
+
+/* ───────────── API HTTP (app tuée : pas de WebSocket) ───────────── */
+
+/** Le téléphone appelé confirme qu'il sonne (réveil par push réussi) */
+function ackCall(phone, callId) {
+  const call = calls.get(String(callId || ''));
+  if (!call || call.callee !== phone || call.state !== 'ringing') return false;
+  onRingAck(call);
+  log(`✅ Acquittement HTTP : ${phone} sonne (appel ${call.id})`);
+  return true;
+}
+
+/** Refus depuis la notification d'appel (l'app n'a pas de WebSocket) */
+function declineCall(phone, callId) {
+  const call = calls.get(String(callId || ''));
+  if (!call || call.callee !== phone || call.state !== 'ringing') return false;
+  finish(call);
+  sendTo(call.caller, { type: 'reject', call_id: call.id, from: phone, reason: 'declined' });
+  log(`🙅 Refus HTTP : ${phone} → ${call.caller}`);
+  return true;
+}
+
+/** 💬 Prévient l'appli du destinataire (instantané, sans passer par FCM) */
+function notifyMessage(toPhone, payload) {
+  const p = normalizePhone(toPhone);
+  return p ? sendTo(p, { type: 'msg', ...payload }) : false;
+}
+
+/* ───────────── Relais générique (appels inconnus du standardiste) ───────────── */
+
+function forward(user, type, msg, to) {
+  const fwd = {
+    type,
+    call_id: msg.call_id,
+    from: user.phone,
+    ...(msg.reason ? { reason: String(msg.reason).slice(0, 30) } : {}),
+    ...(type === 'offer' ? {
+      from_name: user.name || '', from_avatar: user.avatar || null, sdp: msg.sdp,
+    } : {}),
+    ...((type === 'answer' || type === 'reoffer' || type === 'reanswer') ? { sdp: msg.sdp } : {}),
+    ...(type === 'ice' ? { candidate: msg.candidate } : {}),
+  };
+  return sendTo(to, fwd);
+}
+
+/* ───────────── Traitement des messages ───────────── */
+
+async function onOffer(ws, user, msg, to) {
+  const callId = String(msg.call_id || '');
+  if (!callId || callId.length > 80 || !to || to === user.phone) return;
+  if (calls.has(callId)) return; // offre déjà reçue (renvoi) : idempotent
+
+  if (!allowOffer(user.phone)) {
+    send(ws, { type: 'reject', call_id: callId, from: to, reason: 'busy' });
+    return;
+  }
+  // 📵 Un autre appelant fait déjà sonner ce numéro → « occupé » immédiat
+  for (const c of calls.values()) {
+    if (c.callee === to && c.state === 'ringing' && c.caller !== user.phone) {
+      send(ws, { type: 'reject', call_id: callId, from: to, reason: 'busy' });
+      log(`📵 Occupé : ${to} sonne déjà pour ${c.caller} (refus de ${user.phone})`);
+      return;
+    }
+  }
+  // Un ancien appel du même appelant vers le même numéro est abandonné
+  for (const c of calls.values()) {
+    if (c.caller === user.phone && c.state === 'ringing') cancelByCaller(c, 'replaced');
+  }
+
+  const call = {
+    id: callId, caller: user.phone, callerName: user.name || '', callee: to,
+    state: 'ringing', createdAt: Date.now(),
+    offerMsg: {
+      type: 'offer', call_id: callId, from: user.phone,
+      from_name: user.name || '', from_avatar: user.avatar || null, sdp: msg.sdp,
+    },
+    ice: [], ringAck: false, pushSent: false, fallbackSent: false, delivered: false,
+    ghostTimer: null, wakeTimer: null, ttlTimer: null,
+  };
+  calls.set(callId, call);
+  call.ttlTimer = setTimeout(() => expireCall(call), RING_TTL);
+  if (call.ttlTimer.unref) call.ttlTimer.unref();
+
+  const entry = online.get(to);
+  if (entry && send(entry.ws, call.offerMsg)) {
+    call.delivered = true;
+    armGhostGuard(call);
+    // 📱 App connectée mais pas au premier plan : l'écran ne s'allumera pas
+    // tout seul → on réveille AUSSI par notification.
+    if (!entry.fg) {
+      wake(call).catch((e) => warn('⚠️ wake :', e.message));
+    }
+    return;
+  }
+  // 💤 App fermée : réveil par push, l'offre attend en salle d'attente
+  const ok = await wake(call);
+  if (call.state !== 'ringing') return;
+  if (ok) {
+    log(`📲 App fermée chez ${to} → réveil envoyé, appel en salle d'attente`);
+    send(ws, { type: 'push-sent', call_id: callId });
+  } else {
+    finish(call);
+    send(ws, { type: 'peer-offline', call_id: callId });
+  }
+}
+
+async function onMessage(ws, user, raw) {
+  // 🛡️ Garde-fous : message trop gros ou rafale anormale → ignoré
+  if (raw.length > 200_000) return;
+  const t = Date.now();
+  if (!ws._win || t > ws._win.reset) ws._win = { n: 0, reset: t + 10_000 };
+  if (++ws._win.n > 400) return;
+
+  let msg;
+  try { msg = JSON.parse(raw.toString()); } catch (_) { return; }
+  if (!msg || typeof msg !== 'object') return;
+  const type = String(msg.type || '');
+
+  if (type === 'ping') { send(ws, { type: 'pong', t: msg.t }); return; }
+  if (type === 'presence') {
+    const e = online.get(user.phone);
+    if (e && e.ws === ws) { e.fg = msg.state === 'fg'; e.fgAt = Date.now(); }
+    return;
+  }
+  if (type === 'typing') {
+    const to = normalizePhone(msg.to);
+    if (to) sendTo(to, { type: 'typing', from: user.phone });
+    return;
+  }
+  if (!['offer', 'answer', 'ice', 'reject', 'hangup', 'ringing', 'reoffer', 'reanswer'].includes(type)) return;
+
+  const callId = String(msg.call_id || '');
+  const call = calls.get(callId);
+  let to = normalizePhone(msg.to);
+  if (type !== 'ice') {
+    log(`📨 WS ${type} : ${user.phone} → ${to} ${to && online.has(to) ? '✓' : '✗ hors ligne'}`);
+  }
+
+  if (type === 'offer') { await onOffer(ws, user, msg, to); return; }
+
+  /* ── Appel connu du standardiste : routage strict entre les deux parties ── */
+  if (call) {
+    const isCaller = user.phone === call.caller;
+    const isCallee = user.phone === call.callee;
+    if (!isCaller && !isCallee) return; // un tiers ne peut rien injecter
+    to = isCaller ? call.callee : call.caller;
+    if (call.state === 'ended' && type !== 'hangup') {
+      // Signal tardif. Si l'appelé décroche un appel déjà expiré/annulé, on le
+      // lui dit tout de suite (sinon il resterait bloqué sur « connexion »).
+      if (type === 'answer' && isCallee) {
+        send(ws, { type: 'hangup', call_id: call.id, from: call.caller, reason: 'ended' });
+      }
+      return;
+    }
+
+    switch (type) {
+      case 'ringing':
+        if (isCallee) onRingAck(call);
+        return;
+
+      case 'answer':
+        if (!isCallee || call.state !== 'ringing') return;
+        call.state = 'answered';
+        call.answeredAt = Date.now();
+        call.ringAck = true;
+        clearTimers(call);
+        call.ice = [];
+        call.offerMsg = null;
+        forward(user, 'answer', msg, to);
+        // 🔕 Réponse : tout écran d'appel resté ailleurs (push) doit disparaître
+        if (call.pushSent) {
+          getUser(call.callee).then((c) => {
+            if (c && c.fcm_token) push.sendCallCancelPush(c.fcm_token,
+              { callId: call.id, fromPhone: call.caller, reason: 'answered' });
+          }).catch(() => {});
+        }
+        return;
+
+      case 'ice':
+        if (call.state === 'ringing' && isCaller) {
+          // Mémorisé pour rejeu (socket fantôme, app réveillée par push…)
+          if (call.ice.length < MAX_CALL_ICE) {
+            call.ice.push({ call_id: call.id, candidate: msg.candidate });
+          }
+        }
+        forward(user, 'ice', msg, to);
+        return;
+
+      case 'reject':
+        if (!isCallee || call.state !== 'ringing') return;
+        finish(call);
+        forward(user, 'reject', msg, to);
+        return;
+
+      case 'hangup':
+        if (call.state === 'ringing') {
+          if (isCaller) { cancelByCaller(call, msg.reason); return; }
+          // l'appelé raccroche pendant la sonnerie = refus
+          finish(call);
+          forward(user, 'reject', { ...msg, reason: msg.reason || 'declined' }, to);
+          return;
+        }
+        if (call.state === 'answered') finish(call); // trace brève puis purge
+        forward(user, 'hangup', msg, to);
+        return;
+
+      default: // reoffer / reanswer
+        forward(user, type, msg, to);
+        return;
+    }
+  }
+
+  /* ── Appel inconnu (serveur redémarré en pleine conversation) : relais simple ── */
+  if (!to) return;
+  forward(user, type, msg, to);
+}
+
+/* ───────────── Initialisation ───────────── */
+
 function init(server) {
-  const wss = new WebSocket.Server({ server, path: '/ws' });
+  const wss = new WebSocket.Server({ server, path: '/ws', maxPayload: 256 * 1024 });
 
   wss.on('connection', async (ws, req) => {
-    // --- Authentification par jeton (même JWT que l'API REST) ---
     let user;
     try {
       const url = new URL(req.url, 'http://x');
       const payload = verifyToken(url.searchParams.get('token') || '');
       if (!payload) throw new Error('jeton invalide');
       user = await db.get(
-        'SELECT id, phone, name, avatar FROM users WHERE id = ?',
-        [payload.uid]
-      );
+        `SELECT id, phone, name, avatar FROM users WHERE id = ? AND status = 'active'`,
+        [payload.uid]);
     } catch (_) { /* jeton invalide */ }
     if (!user) return ws.close(4001, 'auth');
 
-    // Une seule connexion par numéro : la nouvelle remplace l'ancienne
+    // Une seule connexion par numéro : la nouvelle remplace l'ancienne.
+    // Code 4002 = « remplacée » : l'ancien appareil ne boucle pas en reconnexion.
     const prev = online.get(user.phone);
-    if (prev && prev.ws !== ws) { try { prev.ws.close(); } catch (_) {} }
-    online.set(user.phone, { ws, user });
-    console.log(`🔌 WS connecté : ${user.phone} (${online.size} en ligne)`);
+    if (prev && prev.ws !== ws) { try { prev.ws.close(4002, 'replaced'); } catch (_) {} }
+    // fg=false par défaut : l'app annonce son état juste après (presence)
+    online.set(user.phone, { ws, user, fg: false, fgAt: 0 });
+    log(`🔌 WS connecté : ${user.phone} (${online.size} en ligne)`);
     ws._phone = user.phone;
     ws._alive = true;
     ws.on('pong', () => { ws._alive = true; });
 
-    // 📬 Un appel attendait ce téléphone (notification touchée) → on le livre
-    const waiting = pending.get(user.phone);
-    if (waiting) {
-      pending.delete(user.phone);
-      if (Date.now() - waiting.ts <= PENDING_TTL) {
-        try {
-          ws.send(JSON.stringify(waiting.offer));
-          for (const ice of waiting.ice) {
-            ws.send(JSON.stringify({
-              type: 'ice', call_id: ice.call_id,
-              from: waiting.caller, candidate: ice.candidate,
-            }));
-          }
-          console.log(`📬 Appel en attente livré : ${waiting.caller} → ${user.phone}`);
-        } catch (_) {}
+    // 📬 Appels qui attendaient ce téléphone (réveil par push, reconnexion…)
+    for (const call of calls.values()) {
+      if (call.callee !== user.phone || call.state !== 'ringing' || !call.offerMsg) continue;
+      if (Date.now() - call.createdAt > RING_TTL) continue;
+      if (send(ws, call.offerMsg)) {
+        call.delivered = true;
+        for (const i of call.ice) {
+          send(ws, { type: 'ice', call_id: i.call_id, from: call.caller, candidate: i.candidate });
+        }
+        log(`📬 Appel en attente livré : ${call.caller} → ${user.phone}`);
       }
     }
 
     ws.on('message', (raw) => {
-      // 🛡️ Garde-fou : message anormalement gros → ignoré (anti-abus)
-      if (raw.length > 200_000) return;
-      let msg;
-      try { msg = JSON.parse(raw.toString()); } catch (_) { return; }
-      const type = String(msg.type || '');
-      if (!['offer', 'answer', 'ice', 'reject', 'hangup', 'ringing', 'reoffer', 'reanswer'].includes(type)) return;
-
-      const to = normalizePhone(msg.to);
-      const dest = to && online.get(to);
-      if (type !== 'ice') console.log(`📨 WS ${type} : ${user.phone} → ${to} ${dest ? '✓' : '✗ hors ligne'}`);
-
-      // 👻 v2.9.1 : l'appelé répond au standardiste → sa connexion est vivante
-      if (type === 'ringing' || type === 'answer' || type === 'reject') {
-        clearGhostGuard(user.phone);
-      }
-      // 👻 L'appelant renonce pendant la fenêtre fantôme → garde annulée
-      if ((type === 'hangup' || type === 'reject') && to) {
-        const g = awaitingRing.get(to);
-        if (g && g.caller === user.phone) clearGhostGuard(to);
-      }
-
-      if (!dest) {
-        // Destinataire hors ligne → notification push ou salle d'attente
-        handleOffline(ws, user, type, to, msg);
-        return;
-      }
-
-      // 👻 v2.9.1 : offre transmise à un socket peut-être mort → on arme la
-      // garde ; les ICE de l'appelant sont copiés pour rejeu éventuel
-      if (type === 'offer') armGhostGuard(ws, user, to, msg);
-      if (type === 'ice') {
-        const g = awaitingRing.get(to);
-        if (g && g.caller === user.phone) {
-          g.ice.push({ call_id: msg.call_id, candidate: msg.candidate });
-        }
-      }
-
-      // On fait suivre, en ajoutant l'identité de l'expéditeur
-      const fwd = {
-        type,
-        call_id: msg.call_id,
-        from: user.phone,
-        ...(type === 'offer' ? {
-          from_name: user.name || '',
-          from_avatar: user.avatar || null,
-          sdp: msg.sdp,
-        } : {}),
-        ...(type === 'answer' ? { sdp: msg.sdp } : {}),
-        ...(type === 'reoffer' || type === 'reanswer' ? { sdp: msg.sdp } : {}), // 🔄 v2.8.1 relance ICE
-        ...(type === 'ice' ? { candidate: msg.candidate } : {}),
-      };
-      try { dest.ws.send(JSON.stringify(fwd)); } catch (_) {}
+      onMessage(ws, user, raw).catch((e) => warn('⚠️ WS message :', e.message));
     });
 
     ws.on('close', () => {
       const cur = online.get(ws._phone);
       if (cur && cur.ws === ws) {
         online.delete(ws._phone);
-        console.log(`🔌 WS déconnecté : ${ws._phone} (${online.size} en ligne)`);
+        log(`🔌 WS déconnecté : ${ws._phone} (${online.size} en ligne)`);
+        // 🏃 L'appelant a disparu en pleine sonnerie ? Délai de grâce (micro-coupure)
+        const phone = ws._phone;
+        const timer = setTimeout(() => {
+          if (online.has(phone)) return; // il est revenu
+          for (const c of calls.values()) {
+            if (c.caller === phone && c.state === 'ringing') cancelByCaller(c, 'caller_gone');
+          }
+        }, CALLER_GONE_MS);
+        if (timer.unref) timer.unref();
       }
     });
   });
 
-  // 💓 Battement de cœur : nettoie les connexions mortes (30 s)
+  // 💓 Battement de cœur (30 s) + ménage
   setInterval(() => {
     for (const [phone, { ws }] of online) {
       if (!ws._alive) { try { ws.terminate(); } catch (_) {} online.delete(phone); continue; }
       ws._alive = false;
       try { ws.ping(); } catch (_) {}
     }
-    // 🧹 Appels en attente expirés (l'appelant a raccroché depuis longtemps)
-    for (const [phone, p] of pending) {
-      if (Date.now() - p.ts > PENDING_TTL) {
-        pending.delete(phone);
-        notifyMissed(phone, p); // 📵 v2.9.1 : « Appel manqué » dans la barre
-      }
+    const t = Date.now();
+    for (const [id, c] of calls) {
+      if (c.state === 'ended' && t - c.endedAt > ENDED_KEEP_MS) calls.delete(id);
+      else if (c.state === 'answered' && t - c.answeredAt > ANSWERED_MAX_MS) calls.delete(id);
+      else if (c.state === 'ringing' && t - c.createdAt > RING_TTL + 30_000) { finish(c); }
     }
-  }, 30000).unref();
+    for (const [p, b] of offerBuckets) if (t > b.reset) offerBuckets.delete(p);
+  }, 30_000).unref();
 
-  console.log('🎙️  Canal temps réel /ws prêt (appels voix MboteCall)');
+  log('🎙️  Canal temps réel /ws prêt (appels voix MboteCall)');
 }
 
-/**
- * 📲 L'appelé est hors ligne : si son téléphone est joignable par notification,
- * on garde l'appel au chaud et on le réveille ; sinon → « injoignable ».
- */
-async function handleOffline(ws, user, type, to, msg) {
-  const p = pending.get(to);
-
-  // L'appelant complète ou annule un appel déjà en salle d'attente
-  if (p && p.caller === user.phone) {
-    if (type === 'ice') {
-      p.ice.push({ call_id: msg.call_id, candidate: msg.candidate });
-      return;
-    }
-    if (type === 'hangup' || type === 'reject') {
-      pending.delete(to);
-      console.log(`🧹 Appel en attente annulé : ${user.phone} → ${to}`);
-      notifyMissed(to, p); // 📵 la notification devient « Appel manqué »
-      return;
-    }
-  }
-  if (type !== 'offer') return;
-
-  try {
-    const callee = await db.get(
-      `SELECT fcm_token FROM users WHERE phone = ? AND status = 'active'`, [to]
-    );
-    if (push.enabled() && callee && callee.fcm_token) {
-      const ok = await push.sendCallPush(callee.fcm_token, user.name, user.phone);
-      if (ok) {
-        pending.set(to, {
-          caller: user.phone,
-          ts: Date.now(),
-          ice: [],
-          offer: {
-            type: 'offer',
-            call_id: msg.call_id,
-            from: user.phone,
-            from_name: user.name || '',
-            from_avatar: user.avatar || null,
-            sdp: msg.sdp,
-          },
-        });
-        console.log(`📲 App fermée chez ${to} → notification envoyée, appel en salle d'attente`);
-        try { ws.send(JSON.stringify({ type: 'push-sent', call_id: msg.call_id })); } catch (_) {}
-        return;
-      }
-    }
-  } catch (e) {
-    console.error('⚠️ Push appel :', e.message);
-  }
-  // Pas de jeton / push KO → vraiment injoignable
-  try { ws.send(JSON.stringify({ type: 'peer-offline', call_id: msg.call_id })); } catch (_) {}
+/** 🧪 Diagnostic (tests) */
+function _debug() {
+  return {
+    online: [...online.entries()].map(([p, e]) => ({ phone: p, fg: e.fg })),
+    calls: [...calls.values()].map((c) => ({
+      id: c.id, caller: c.caller, callee: c.callee, state: c.state,
+      ringAck: c.ringAck, pushSent: c.pushSent, fallbackSent: c.fallbackSent,
+    })),
+  };
 }
 
-module.exports = { init, isOnline };
+module.exports = { init, isOnline, ackCall, declineCall, notifyMessage, _debug };

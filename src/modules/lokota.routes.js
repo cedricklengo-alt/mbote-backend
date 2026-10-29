@@ -47,21 +47,42 @@ r.post('/send', requireAuth, limitSend, ah(async (req, res) => {
 
   // 🔒 v2.2 Mode privé : le contenu n'est JAMAIS envoyé à l'IA
   const priv = req.body.translate === false;
+  // 🔁 v3.0 : idempotence (un renvoi après timeout ne crée pas de doublon)
+  const clientId = String(req.body.client_id || '').trim().slice(0, 64) || null;
+  if (clientId) {
+    const dup = await db.get(
+      `SELECT id, status FROM voice_notes WHERE from_id = ? AND client_id = ?`,
+      [req.user.id, clientId]);
+    if (dup) return res.json({ id: dup.id, status: dup.status, lokota_mode: lokota.mode(), duplicate: true });
+  }
+
   const id = uid('vn');
-  await db.run(
-    `INSERT INTO voice_notes(id, from_id, to_id, audio, duration_sec, lang_from, lang_to, status, created_at)
-     VALUES(?,?,?,?,?,?,?,?,?)`,
-    [id, req.user.id, toUser.id, audio, dur, lf, lt, priv ? 'no_ai' : 'pending', now()]);
+  try {
+    await db.run(
+      `INSERT INTO voice_notes(id, from_id, to_id, audio, duration_sec, lang_from, lang_to, status, created_at, client_id)
+       VALUES(?,?,?,?,?,?,?,?,?,?)`,
+      [id, req.user.id, toUser.id, audio, dur, lf, lt, priv ? 'no_ai' : 'pending', now(), clientId]);
+  } catch (e) {
+    const again = clientId && await db.get(
+      `SELECT id, status FROM voice_notes WHERE from_id = ? AND client_id = ?`,
+      [req.user.id, clientId]);
+    if (again) return res.json({ id: again.id, status: again.status, lokota_mode: lokota.mode(), duplicate: true });
+    throw e;
+  }
 
   // 🧠 Traduction en tâche de fond (sauf mode privé)
   if (!priv) setImmediate(() => lokota.processNote(id).catch(() => {}));
 
-  // 🔔 Prévenir le destinataire (app fermée comprise)
+  // ⚡ Instantané (app ouverte) puis 🔔 push (app fermée comprise)
+  require('./rtc.ws').notifyMessage(to, {
+    kind: 'message', from_phone: req.user.phone, from_name: req.user.name || '', msg_id: id,
+    preview: '🎤 Note vocale',
+  });
   try {
     const push = require('../services/push');
     if (push.enabled() && toUser.fcm_token) {
       push.sendInfoPush(toUser.fcm_token,
-        `🎙️ ${req.user.name || req.user.phone}`,
+        req.user.name || req.user.phone,
         'Note vocale — touche pour écouter', {
           kind: 'message', from_phone: req.user.phone,
           from_name: req.user.name || '', msg_id: id,
