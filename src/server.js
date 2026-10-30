@@ -67,6 +67,7 @@ app.use('/api/lokota', require('./modules/lokota.routes')); // 🗣️ notes voc
 app.use('/api/messages', require('./modules/messages.routes')); // 💬 v2.0 messagerie traduite
 app.use('/api/rtc', require('./modules/rtc.routes')); // 📡 config ICE (TURN côté serveur — Phase A)
 app.use('/api/payments', require('./modules/payments.routes')); // webhook agrégateur (public)
+app.use('/api/shop',    require('./modules/shop.routes'));     // 🛒 boutique forfaits + FlexPay
 app.use('/api/admin', require('./modules/admin.routes'));
 
 /* ---- Console admin (web) ---- */

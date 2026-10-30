@@ -1,0 +1,382 @@
+/**
+ * Service BOUTIQUE — gestion des forfaits catalogue, commandes, paiements FlexPay,
+ * activation des droits utilisateur et consommation au fil des appels/SMS.
+ *
+ * GARANTIES :
+ *   - Idempotence : un callback répété n'active jamais deux fois le même forfait
+ *   - Atomicité   : activation dans db.tx() — tout ou rien
+ *   - Sécurité    : le montant confirmé est comparé au centime près (± AMOUNT_TOLERANCE_CENTS)
+ *   - Isolation   : ne confond jamais un portefeuille monétaire et un quota de forfait
+ */
+const db = require('../db');
+const { uid, now } = require('../util');
+const { getPayProvider } = require('../providers/payments');
+
+// ── Constantes ────────────────────────────────────────────────────────────────
+/** Tolérance d'arrondi en centimes (ex : FlexPay arrondit parfois à 2 décimales). */
+const AMOUNT_TOLERANCE_CENTS = 1;
+
+// ── Catalogue public ──────────────────────────────────────────────────────────
+
+/**
+ * Retourne la version publique d'un forfait (filtre les champs internes).
+ * @param {object} p - ligne brute de la table shop_packages
+ */
+function publicPackage(p) {
+  return {
+    id:           p.id,
+    name:         p.name,
+    description:  p.description || '',
+    price_cents:  p.price_cents,
+    currency:     p.currency || 'USD',
+    minutes:      p.minutes,
+    sms_count:    p.sms_count || 0,
+    days:         p.days,
+    prefix:       p.prefix || '',
+    category:     p.category || 'credit',
+    conditions:   p.conditions || '',
+    renewable:    p.renewable === 1,
+    active:       p.active === 1,
+    sort_order:   p.sort_order || 0,
+  };
+}
+
+/** Liste les forfaits actifs du catalogue. */
+async function listCatalog() {
+  const rows = await db.all(
+    `SELECT * FROM shop_packages WHERE active = 1 ORDER BY sort_order ASC, price_cents ASC`
+  );
+  return rows.map(publicPackage);
+}
+
+/** Retourne un forfait actif par son id. */
+async function getPackage(id) {
+  return db.get(`SELECT * FROM shop_packages WHERE id = ? AND active = 1`, [id]);
+}
+
+// ── Commandes ─────────────────────────────────────────────────────────────────
+
+/**
+ * Crée une commande verrouillée (prix figé à l'instant T).
+ * Ne déclenche PAS encore le paiement.
+ */
+async function createOrder(userId, packageId) {
+  const pkg = await getPackage(packageId);
+  if (!pkg) throw Object.assign(new Error('Forfait introuvable ou inactif'), { status: 404 });
+
+  const orderId = uid('ord');
+  const expiresAt = now() + 30 * 60 * 1000; // commande valide 30 min
+
+  await db.run(
+    `INSERT INTO shop_orders
+       (id, user_id, package_id, package_name, package_snapshot,
+        amount_cents, currency, status, created_at, expires_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)`,
+    [
+      orderId,
+      userId,
+      pkg.id,
+      pkg.name,
+      JSON.stringify(publicPackage(pkg)),
+      pkg.price_cents,
+      pkg.currency || 'USD',
+      now(),
+      expiresAt,
+    ]
+  );
+  return db.get(`SELECT * FROM shop_orders WHERE id = ?`, [orderId]);
+}
+
+// ── Paiements ─────────────────────────────────────────────────────────────────
+
+/**
+ * Crée un enregistrement de paiement boutique et déclenche le USSD Push / carte.
+ * @param {string} orderId
+ * @param {string} method   - 'mpesa' | 'orange' | 'airtel' | 'card'
+ * @param {string} [phone]  - numéro Mobile Money (requis sauf carte)
+ */
+async function createShopPayment(orderId, method, phone) {
+  const order = await db.get(`SELECT * FROM shop_orders WHERE id = ?`, [orderId]);
+  if (!order) throw Object.assign(new Error('Commande introuvable'), { status: 404 });
+  if (order.status !== 'pending') {
+    throw Object.assign(new Error(`Commande déjà ${order.status}`), { status: 409 });
+  }
+  if (Date.now() > order.expires_at) {
+    await db.run(`UPDATE shop_orders SET status='expired' WHERE id=?`, [orderId]);
+    throw Object.assign(new Error('Commande expirée'), { status: 410 });
+  }
+
+  const provider = getPayProvider();
+  const payId    = uid('spay');
+  const reference = 'SHOP-' + payId.slice(5).toUpperCase();
+
+  await db.run(
+    `INSERT INTO shop_payments
+       (id, order_id, user_id, provider, method, phone, amount_cents, currency,
+        reference, status, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)`,
+    [payId, orderId, order.user_id, provider.name, method, phone || null,
+     order.amount_cents, order.currency, reference, now()]
+  );
+
+  // Déclenche le paiement chez le fournisseur
+  const payRow = await db.get(`SELECT * FROM shop_payments WHERE id = ?`, [payId]);
+  try {
+    // On réutilise l'interface identique à payments.js
+    const adapted = {
+      id:           payRow.id,
+      reference:    payRow.reference,
+      amount_cents: payRow.amount_cents,
+      currency:     payRow.currency,
+      phone:        payRow.phone,
+      order_number: null,
+    };
+    const { order_number } = await provider.initiate(adapted);
+    await db.run(`UPDATE shop_payments SET order_number=? WHERE id=?`, [order_number, payId]);
+  } catch (e) {
+    await db.run(`UPDATE shop_payments SET status='failed', updated_at=? WHERE id=?`, [now(), payId]);
+    throw e;
+  }
+
+  return db.get(`SELECT * FROM shop_payments WHERE id = ?`, [payId]);
+}
+
+// ── Activation ────────────────────────────────────────────────────────────────
+
+/**
+ * Active un forfait après confirmation fiable du paiement.
+ * Idempotent : si le plan est déjà activé pour cette commande, ne fait rien.
+ *
+ * @param {string}        paymentId       - id dans shop_payments
+ * @param {string|number} [confirmedAmount] - montant en cents confirmé par le fournisseur
+ */
+async function activateOrder(paymentId, confirmedAmount) {
+  return db.tx(async (t) => {
+    // 1. Récupérer le paiement et la commande associée
+    const pay = await t.get(
+      `UPDATE shop_payments SET status='success', updated_at=?
+       WHERE id=? AND status='pending'
+       RETURNING *`,
+      [now(), paymentId]
+    );
+    if (!pay) {
+      // Déjà traité (idempotence) — on retourne l'état actuel
+      const existing = await t.get(`SELECT * FROM shop_payments WHERE id=?`, [paymentId]);
+      return { already_processed: true, status: existing?.status };
+    }
+
+    // 2. Vérification du montant (anti sous-paiement)
+    if (confirmedAmount != null) {
+      const confirmedCents = Math.round(Number(confirmedAmount));
+      if (!Number.isFinite(confirmedCents)) {
+        throw new Error(`Montant confirmé invalide : ${confirmedAmount}`);
+      }
+      if (confirmedCents < pay.amount_cents - AMOUNT_TOLERANCE_CENTS) {
+        throw new Error(
+          `Sous-paiement détecté : reçu ${confirmedCents}¢, attendu ${pay.amount_cents}¢`
+        );
+      }
+    }
+
+    // 3. Mettre à jour la commande
+    const order = await t.get(`SELECT * FROM shop_orders WHERE id=?`, [pay.order_id]);
+    if (!order) throw new Error('Commande introuvable lors de l\'activation');
+
+    await t.run(
+      `UPDATE shop_orders SET status='paid', payment_id=?, paid_at=? WHERE id=?`,
+      [pay.id, now(), order.id]
+    );
+
+    // 4. Récupérer le snapshot du forfait
+    let pkg;
+    try { pkg = JSON.parse(order.package_snapshot); } catch { pkg = {}; }
+
+    // 5. Calculer les droits
+    const activatedAt  = now();
+    const expiresAt    = activatedAt + (pkg.days || 30) * 24 * 3600 * 1000;
+    const remainingSec = pkg.minutes > 0 ? pkg.minutes * 60 : 0; // 0 = illimité
+    const unlimited    = pkg.minutes === 0 ? 1 : 0;
+    const planId       = uid('upl');
+
+    // 6. Créer le plan utilisateur
+    await t.run(
+      `INSERT INTO user_plans
+         (id, user_id, order_id, package_id, package_name, prefix,
+          minutes_total, remaining_sec, sms_total, remaining_sms,
+          unlimited, activated_at, expires_at, status)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active')`,
+      [
+        planId,
+        pay.user_id,
+        order.id,
+        order.package_id,
+        order.package_name,
+        pkg.prefix || '',
+        pkg.minutes || 0,
+        remainingSec,
+        pkg.sms_count || 0,
+        pkg.sms_count || 0,
+        unlimited,
+        activatedAt,
+        expiresAt,
+      ]
+    );
+
+    // 7. Transaction financière pour la traçabilité
+    await t.run(
+      `INSERT INTO transactions
+         (id, user_id, type, amount_cents, method, reference, created_at)
+       VALUES (?, ?, 'package_purchase', ?, ?, ?, ?)`,
+      [uid('tx'), pay.user_id, pay.amount_cents, pay.method, pay.reference, now()]
+    );
+
+    return { activated: true, plan_id: planId, expires_at: expiresAt };
+  });
+}
+
+// ── Polling et webhook ────────────────────────────────────────────────────────
+
+/**
+ * Vérifie le statut d'un paiement boutique auprès du fournisseur et active
+ * le forfait si confirmé.
+ */
+async function pollAndActivate(shopPayment) {
+  if (shopPayment.status !== 'pending') return shopPayment.status;
+
+  const provider = getPayProvider();
+  // Adapter pour l'interface checkStatus du provider
+  const adapted = {
+    id:           shopPayment.id,
+    reference:    shopPayment.reference,
+    amount_cents: shopPayment.amount_cents,
+    order_number: shopPayment.order_number,
+  };
+
+  const state = await provider.checkStatus(adapted);
+
+  if (state === 'success') {
+    await activateOrder(shopPayment.id).catch((e) =>
+      console.error('⚠️ Activation différée (sera reprise) :', e.message)
+    );
+  } else if (state === 'failed') {
+    await db.run(
+      `UPDATE shop_payments SET status='failed', updated_at=? WHERE id=? AND status='pending'`,
+      [now(), shopPayment.id]
+    );
+    await db.run(
+      `UPDATE shop_orders SET status='failed' WHERE id=? AND status='pending'`,
+      [(await db.get(`SELECT order_id FROM shop_payments WHERE id=?`, [shopPayment.id]))?.order_id]
+    );
+  }
+
+  return state;
+}
+
+// ── Plans utilisateur ─────────────────────────────────────────────────────────
+
+/** Forfaits actifs d'un utilisateur, triés par expiration la plus proche. */
+async function userActivePlans(userId) {
+  return db.all(
+    `SELECT * FROM user_plans
+     WHERE user_id = ? AND status = 'active' AND expires_at > ?
+     ORDER BY expires_at ASC`,
+    [userId, now()]
+  );
+}
+
+/** Tous les forfaits d'un utilisateur (actifs + expirés + épuisés). */
+async function userAllPlans(userId) {
+  return db.all(
+    `SELECT * FROM user_plans WHERE user_id = ? ORDER BY activated_at DESC`,
+    [userId]
+  );
+}
+
+/**
+ * Consomme des secondes depuis le forfait le plus adapté (expiration la plus proche).
+ * Retourne { consumed, plan_id } ou null si aucun forfait éligible.
+ *
+ * @param {string} userId
+ * @param {string} prefix    - préfixe du numéro appelé (pour vérifier l'éligibilité)
+ * @param {number} seconds   - secondes à facturer
+ */
+async function consumeSeconds(userId, prefix, seconds) {
+  const plans = await userActivePlans(userId);
+  // Filtre : le forfait doit couvrir la destination (prefix vide = toutes destinations)
+  const eligible = plans.filter((p) => !p.prefix || prefix.startsWith(p.prefix));
+  if (!eligible.length) return null;
+
+  const plan = eligible[0]; // priorité : expiration la plus proche
+
+  if (plan.unlimited) {
+    // Forfait illimité : on note la consommation sans déduire
+    await db.run(
+      `UPDATE user_plans SET consumed_sec = consumed_sec + ? WHERE id=?`,
+      [seconds, plan.id]
+    );
+    return { consumed: seconds, plan_id: plan.id };
+  }
+
+  const toConsume = Math.min(seconds, plan.remaining_sec);
+  if (toConsume <= 0) return null;
+
+  const newRemaining = plan.remaining_sec - toConsume;
+  const newStatus = newRemaining <= 0 ? 'exhausted' : 'active';
+
+  await db.run(
+    `UPDATE user_plans
+     SET remaining_sec = ?, consumed_sec = consumed_sec + ?, status = ?
+     WHERE id=?`,
+    [newRemaining, toConsume, newStatus, plan.id]
+  );
+  return { consumed: toConsume, plan_id: plan.id };
+}
+
+/**
+ * Consomme des SMS depuis le forfait le plus adapté.
+ * Retourne { consumed, plan_id } ou null.
+ */
+async function consumeSms(userId, prefix, count) {
+  const plans = await userActivePlans(userId);
+  const eligible = plans.filter(
+    (p) => (p.sms_total > 0 || p.unlimited) && (!p.prefix || prefix.startsWith(p.prefix))
+  );
+  if (!eligible.length) return null;
+
+  const plan = eligible[0];
+  if (plan.unlimited) {
+    await db.run(
+      `UPDATE user_plans SET consumed_sms = consumed_sms + ? WHERE id=?`,
+      [count, plan.id]
+    );
+    return { consumed: count, plan_id: plan.id };
+  }
+
+  const toConsume = Math.min(count, plan.remaining_sms);
+  if (toConsume <= 0) return null;
+
+  const newRemaining = plan.remaining_sms - toConsume;
+  const newStatus = newRemaining <= 0 && plan.remaining_sec <= 0 ? 'exhausted' : 'active';
+
+  await db.run(
+    `UPDATE user_plans
+     SET remaining_sms = ?, consumed_sms = consumed_sms + ?, status = ?
+     WHERE id=?`,
+    [newRemaining, toConsume, newStatus, plan.id]
+  );
+  return { consumed: toConsume, plan_id: plan.id };
+}
+
+module.exports = {
+  publicPackage,
+  listCatalog,
+  getPackage,
+  createOrder,
+  createShopPayment,
+  activateOrder,
+  pollAndActivate,
+  userActivePlans,
+  userAllPlans,
+  consumeSeconds,
+  consumeSms,
+};
