@@ -281,6 +281,12 @@ const MIGRATIONS = [
 
   // ── v3.2 TRANSACTIONS — statut pour réservations ──
   `ALTER TABLE transactions ADD COLUMN status TEXT DEFAULT 'confirmed'`,
+
+  // ── v3.3 BOUTIQUE — cadeaux de forfaits ──
+  `ALTER TABLE shop_orders ADD COLUMN recipient_phone TEXT`,
+  `ALTER TABLE shop_orders ADD COLUMN recipient_name TEXT`,
+  `ALTER TABLE user_plans ADD COLUMN recipient_phone TEXT`,
+  `ALTER TABLE user_plans ADD COLUMN is_gift INTEGER DEFAULT 0`,
 ];
 
 let db;

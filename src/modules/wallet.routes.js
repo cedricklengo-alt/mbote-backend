@@ -121,4 +121,42 @@ r.get('/payments', requireAuth, ah(async (req, res) => {
      FROM payments WHERE user_id = ? ORDER BY created_at DESC LIMIT 50`, [req.user.id]));
 }));
 
+/* 5) Statistiques du portefeuille (30 derniers jours) */
+r.get('/stats', requireAuth, ah(async (req, res) => {
+  const uid = req.user.id;
+  const since = Date.now() - 30 * 24 * 60 * 60 * 1000; // 30 jours
+
+  // Dépenses par catégorie sur 30 jours
+  const [topup30, spent30, callSpent30, transferOut30, airtimeSpent30, txList] = await Promise.all([
+    db.get(
+      `SELECT COALESCE(SUM(amount_cents),0) AS total FROM payments
+       WHERE user_id=? AND status='confirmed' AND created_at>=?`, [uid, since]),
+    db.get(
+      `SELECT COALESCE(SUM(ABS(amount_cents)),0) AS total FROM transactions
+       WHERE user_id=? AND amount_cents<0 AND created_at>=?`, [uid, since]),
+    db.get(
+      `SELECT COALESCE(SUM(ABS(amount_cents)),0) AS total FROM transactions
+       WHERE user_id=? AND type='call_debit' AND created_at>=?`, [uid, since]),
+    db.get(
+      `SELECT COALESCE(SUM(ABS(amount_cents)),0) AS total FROM transactions
+       WHERE user_id=? AND type='transfer_out' AND created_at>=?`, [uid, since]),
+    db.get(
+      `SELECT COALESCE(SUM(ABS(amount_cents)),0) AS total FROM transactions
+       WHERE user_id=? AND type='airtime_debit' AND created_at>=?`, [uid, since]),
+    db.all(
+      `SELECT id,type,amount_cents,method,reference,created_at FROM transactions
+       WHERE user_id=? ORDER BY created_at DESC LIMIT 20`, [uid]),
+  ]);
+
+  res.json({
+    period_days: 30,
+    topup_cents:        topup30.total,
+    spent_cents:        spent30.total,
+    call_spent_cents:   callSpent30.total,
+    transfer_out_cents: transferOut30.total,
+    airtime_cents:      airtimeSpent30.total,
+    transactions:       txList,
+  });
+}));
+
 module.exports = r;

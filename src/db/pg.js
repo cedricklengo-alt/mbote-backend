@@ -184,6 +184,12 @@ CREATE TABLE IF NOT EXISTS msg_hidden (
   at      BIGINT NOT NULL,
   PRIMARY KEY (user_id, msg_id)
 );
+
+-- v3.3 BOUTIQUE — cadeaux de forfaits
+ALTER TABLE shop_orders ADD COLUMN IF NOT EXISTS recipient_phone TEXT;
+ALTER TABLE shop_orders ADD COLUMN IF NOT EXISTS recipient_name TEXT;
+ALTER TABLE user_plans ADD COLUMN IF NOT EXISTS recipient_phone TEXT;
+ALTER TABLE user_plans ADD COLUMN IF NOT EXISTS is_gift BOOLEAN DEFAULT FALSE;
 `;
 
 // Convertit les placeholders « ? » (style SQLite) en « $1, $2… » (style PG)

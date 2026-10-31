@@ -103,10 +103,34 @@ router.get('/catalog', requireAuth, ah(async (req, res) => {
 // ── Commandes ─────────────────────────────────────────────────────────────────
 
 router.post('/orders', requireAuth, orderRateLimit, ah(async (req, res) => {
-  const { package_id } = req.body;
-  if (!package_id) return res.status(400).json({ error: 'package_id requis' });
+  // 🔐 B8 : Valider package_id comme entier positif (MSTG-PLATFORM-2)
+  // Sans validation, un attaquant peut injecter une valeur arbitraire (ex: '1 OR 1=1')
+  const rawPkgId = req.body.package_id;
+  const package_id = parseInt(rawPkgId, 10);
+  if (!rawPkgId || !Number.isFinite(package_id) || package_id <= 0)
+    return res.status(400).json({ error: 'package_id doit être un entier positif' });
 
   const order = await shop.createOrder(req.user.id, package_id);
+  res.status(201).json({ order });
+}));
+
+// ── Commande cadeau pour un tiers ──────────────────────────────────────────────
+router.post('/gift-orders', requireAuth, orderRateLimit, ah(async (req, res) => {
+  const { recipient_phone, recipient_name } = req.body;
+  // 🔐 B8 : Valider package_id comme entier positif (MSTG-PLATFORM-2)
+  const rawGiftId = req.body.package_id;
+  const package_id = parseInt(rawGiftId, 10);
+  if (!rawGiftId || !Number.isFinite(package_id) || package_id <= 0)
+    return res.status(400).json({ error: 'package_id doit être un entier positif' });
+  if (!recipient_phone)  return res.status(400).json({ error: 'recipient_phone requis' });
+
+  // Normaliser le numéro +243XXXXXXXXX
+  const phone = String(recipient_phone).replace(/\s/g, '');
+  if (!/^\+243\d{9}$/.test(phone)) {
+    return res.status(400).json({ error: 'Numéro recipient invalide (format +243XXXXXXXXX)' });
+  }
+
+  const order = await shop.createGiftOrder(req.user.id, package_id, phone, recipient_name || null);
   res.status(201).json({ order });
 }));
 

@@ -367,11 +367,43 @@ async function consumeSms(userId, prefix, count) {
   return { consumed: toConsume, plan_id: plan.id };
 }
 
+
+/**
+ * Crée une commande cadeau pour un tiers (recipient_phone).
+ * Le bénéficiaire est identifié par son numéro +243.
+ * L'expéditeur (userId) paie via Mobile Money ou Visa.
+ */
+async function createGiftOrder(userId, packageId, recipientPhone, recipientName) {
+  const db = require('../db');
+  const pkg = await getPackage(packageId);
+  if (!pkg) throw Object.assign(new Error('Forfait introuvable'), { status: 404 });
+
+  const id      = require('crypto').randomUUID();
+  const now     = Date.now();
+  const expires = now + 30 * 60 * 1000; // 30 min
+
+  await db.run(
+    `INSERT INTO shop_orders
+       (id, user_id, package_id, package_name, package_snapshot,
+        amount_cents, currency, status, recipient_phone, recipient_name,
+        created_at, expires_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?)`,
+    [
+      id, userId, pkg.id, pkg.name, JSON.stringify(pkg),
+      pkg.price_cents, pkg.currency || 'USD',
+      recipientPhone, recipientName || null,
+      now, expires,
+    ]
+  );
+  return { id, packageId: pkg.id, packageName: pkg.name, amountCents: pkg.price_cents, recipientPhone, recipientName };
+}
+
 module.exports = {
   publicPackage,
   listCatalog,
   getPackage,
   createOrder,
+  createGiftOrder,
   createShopPayment,
   activateOrder,
   pollAndActivate,
