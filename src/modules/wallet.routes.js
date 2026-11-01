@@ -9,7 +9,7 @@
  */
 const express = require('express');
 const db = require('../db');
-const { normalizePhone, ah } = require('../util');
+const { normalizePhone, ah, now } = require('../util');
 const { requireAuth } = require('../middleware/auth');
 const { createPayment, pollAndSettle } = require('../services/payments');
 const { getPayProvider } = require('../providers/payments');
@@ -25,6 +25,49 @@ r.get('/', requireAuth, ah(async (req, res) => {
 }));
 
 /* 1) Lancer une recharge : crée le paiement + déclenche le USSD Push */
+/**
+ * Tableau de bord du portefeuille — 30 derniers jours.
+ *
+ * Les montants sont SIGNÉS en base (crédits > 0, débits < 0), d'où les
+ * agrégats par signe plutôt que par liste de types : un nouveau type de
+ * crédit ou de débit est comptabilisé sans modifier cette route.
+ *
+ * Réponse : { topup_cents, spent_cents, call_spent_cents, transactions[] }
+ * — les trois totaux sont positifs ; `transactions` garde le signe.
+ */
+r.get('/stats', requireAuth, ah(async (req, res) => {
+  const since = now() - 30 * 24 * 60 * 60 * 1000;
+  const sums = await db.get(
+    `SELECT
+       COALESCE(SUM(CASE WHEN amount_cents > 0 THEN amount_cents ELSE 0 END), 0)   AS topup_cents,
+       COALESCE(-SUM(CASE WHEN amount_cents < 0 THEN amount_cents ELSE 0 END), 0)  AS spent_cents,
+       COALESCE(-SUM(CASE WHEN type = 'call_debit' THEN amount_cents ELSE 0 END), 0) AS call_spent_cents
+     FROM transactions
+     WHERE user_id = ? AND created_at >= ?`,
+    [req.user.id, since]);
+
+  const rows = await db.all(
+    `SELECT id, type, amount_cents, method, reference, status, created_at
+       FROM transactions
+      WHERE user_id = ?
+      ORDER BY created_at DESC
+      LIMIT 50`,
+    [req.user.id]);
+
+  // PostgreSQL renvoie SUM() et BIGINT en chaîne : on normalise en nombres,
+  // sinon le client Flutter lit null et affiche 0 / 01-01-1970.
+  res.json({
+    topup_cents: Number(sums?.topup_cents || 0),
+    spent_cents: Number(sums?.spent_cents || 0),
+    call_spent_cents: Number(sums?.call_spent_cents || 0),
+    transactions: (rows || []).map((t) => ({
+      ...t,
+      amount_cents: Number(t.amount_cents),
+      created_at: Number(t.created_at),
+    })),
+  });
+}));
+
 r.post('/topup', requireAuth, ah(async (req, res) => {
   const amount = Math.round(Number(req.body.amount_cents));
   const method = String(req.body.method || '');
@@ -48,7 +91,7 @@ r.post('/topup', requireAuth, ah(async (req, res) => {
     payment_id: payment.id,
     status: 'pending',
     provider: getPayProvider().name,
-    message: `Confirme le paiement sur le téléphone ${phone} (tape ton code PIN ${method === 'mpesa' ? 'M-Pesa' : method === 'orange' ? 'Orange Money' : method === 'airtel' ? 'Airtel Money' : ''})`,
+    message: `Confirmez le paiement sur le téléphone ${phone} (tapez votre code PIN ${method === 'mpesa' ? 'M-Pesa' : method === 'orange' ? 'Orange Money' : method === 'airtel' ? 'Airtel Money' : ''})`,
   });
 }));
 
@@ -71,7 +114,7 @@ r.get('/topup/:id/status', requireAuth, ah(async (req, res) => {
   });
 }));
 
-/* 3) 💸 Transfert de crédit MboteCall (le différenciateur diaspora) */
+/* 3) 💸 Transfert de crédit MBOTE → MBOTE (le différenciateur diaspora) */
 r.post('/transfer', requireAuth, ah(async (req, res) => {
   const toPhone = normalizePhone(req.body.to_phone);
   const amount = Math.round(Number(req.body.amount_cents));
@@ -82,7 +125,7 @@ r.post('/transfer', requireAuth, ah(async (req, res) => {
     return res.status(400).json({ error: 'Montant entre 0,50 $ et 500 $' });
 
   const dest = await db.get(`SELECT id, name, phone, status FROM users WHERE phone = ? AND role = 'user'`, [toPhone]);
-  if (!dest) return res.status(404).json({ error: 'Ce numéro n\'a pas encore de compte MboteCall — invite-le avec ton code parrain' });
+  if (!dest) return res.status(404).json({ error: 'Ce numéro n\'a pas encore de compte MBOTE! — invitez-le avec votre code parrain 🎁' });
   if (dest.status === 'blocked') return res.status(403).json({ error: 'Le compte du bénéficiaire est bloqué' });
 
   const { uid: mkId, now: ts } = require('../util');
@@ -119,44 +162,6 @@ r.get('/payments', requireAuth, ah(async (req, res) => {
   res.json(await db.all(
     `SELECT id, amount_cents, bonus_cents, method, phone, status, reference, created_at
      FROM payments WHERE user_id = ? ORDER BY created_at DESC LIMIT 50`, [req.user.id]));
-}));
-
-/* 5) Statistiques du portefeuille (30 derniers jours) */
-r.get('/stats', requireAuth, ah(async (req, res) => {
-  const uid = req.user.id;
-  const since = Date.now() - 30 * 24 * 60 * 60 * 1000; // 30 jours
-
-  // Dépenses par catégorie sur 30 jours
-  const [topup30, spent30, callSpent30, transferOut30, airtimeSpent30, txList] = await Promise.all([
-    db.get(
-      `SELECT COALESCE(SUM(amount_cents),0) AS total FROM payments
-       WHERE user_id=? AND status='confirmed' AND created_at>=?`, [uid, since]),
-    db.get(
-      `SELECT COALESCE(SUM(ABS(amount_cents)),0) AS total FROM transactions
-       WHERE user_id=? AND amount_cents<0 AND created_at>=?`, [uid, since]),
-    db.get(
-      `SELECT COALESCE(SUM(ABS(amount_cents)),0) AS total FROM transactions
-       WHERE user_id=? AND type='call_debit' AND created_at>=?`, [uid, since]),
-    db.get(
-      `SELECT COALESCE(SUM(ABS(amount_cents)),0) AS total FROM transactions
-       WHERE user_id=? AND type='transfer_out' AND created_at>=?`, [uid, since]),
-    db.get(
-      `SELECT COALESCE(SUM(ABS(amount_cents)),0) AS total FROM transactions
-       WHERE user_id=? AND type='airtime_debit' AND created_at>=?`, [uid, since]),
-    db.all(
-      `SELECT id,type,amount_cents,method,reference,created_at FROM transactions
-       WHERE user_id=? ORDER BY created_at DESC LIMIT 20`, [uid]),
-  ]);
-
-  res.json({
-    period_days: 30,
-    topup_cents:        topup30.total,
-    spent_cents:        spent30.total,
-    call_spent_cents:   callSpent30.total,
-    transfer_out_cents: transferOut30.total,
-    airtime_cents:      airtimeSpent30.total,
-    transactions:       txList,
-  });
 }));
 
 module.exports = r;

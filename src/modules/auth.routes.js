@@ -3,18 +3,17 @@
  * En mode démo, le code OTP est renvoyé dans la réponse (pas de SMS réel).
  */
 const express = require('express');
+const crypto = require('crypto');
 const db = require('../db');
 const { uid, now, normalizePhone, ah } = require('../util');
 const { sign, requireAuth } = require('../middleware/auth');
-const { rateLimit } = require('../middleware/ratelimit');
 const referral = require('../services/referral');
+const shop = require('../services/shop');
 const sms = require('../services/sms');
+const { rateLimit } = require('../middleware/ratelimit');
 
 const r = express.Router();
 const DEMO = () => String(process.env.DEMO_MODE || 'true') === 'true';
-
-/* 🛡️ Anti-abus : un même numéro ne peut pas demander un code en boucle,
- * ni essayer des codes en rafale (force brute). */
 const limitOtpAsk = rateLimit({
   windowMs: 10 * 60_000, max: 4,
   key: (req) => 'otp-ask:' + (normalizePhone(req.body.phone) || req.ip),
@@ -23,49 +22,45 @@ const limitOtpAsk = rateLimit({
 const limitOtpTry = rateLimit({
   windowMs: 10 * 60_000, max: 8,
   key: (req) => 'otp-try:' + (normalizePhone(req.body.phone) || req.ip),
-  message: 'Trop d\'essais — patiente 10 minutes puis réessaie',
+  message: 'Trop d’essais — patiente 10 minutes puis réessaie',
+});
+const pinAttempts = new Map();
+const limitPinAsk = rateLimit({
+  windowMs: 10 * 60_000, max: 3,
+  key: (req) => 'pin-ask:' + (req.user?.id || req.ip),
+  message: 'Trop de demandes — patiente 10 minutes puis réessaie',
 });
 
 /* 1) Demander un code OTP */
 r.post('/request-otp', limitOtpAsk, ah(async (req, res) => {
   const phone = normalizePhone(req.body.phone);
   if (!phone) return res.status(400).json({ error: 'Numéro invalide (format +243…)' });
+  if (!DEMO() && !sms.enabled())
+    return res.status(503).json({ error: 'Envoi SMS non configuré sur le serveur' });
 
-  const code = String(Math.floor(100000 + Math.random() * 900000));
+  const code = String(crypto.randomInt(100000, 1000000));
+  const expires = now() + 5 * 60_000;
   await db.run(
     'INSERT INTO otps(phone, code, expires_at) VALUES(?,?,?) ON CONFLICT(phone) DO UPDATE SET code=?, expires_at=?',
-    [phone, code, now() + 5 * 60_000, code, now() + 5 * 60_000]
+    [phone, code, expires, code, expires]
   );
 
-  // 📲 SMS RÉEL via Africa's Talking dès que les clés AT_* sont présentes
   if (sms.enabled()) {
-    const envoi = await sms.sendSms(
-      phone,
-      `MboteCall: ton code est ${code}. Valable 5 min. Ne le partage jamais.`
-    );
-    if (DEMO()) {
-      // En démo on garde aussi le code dans la réponse (numéros de test sans vraie SIM)
-      console.log(`📲 [DEMO] OTP pour ${phone} : ${code} (SMS réel : ${envoi.ok ? 'envoyé ✅' : 'échec ❌'})`);
-      return res.json({ sent: true, demo_code: code });
-    }
-    if (!envoi.ok) {
-      return res.status(502).json({ error: 'SMS non envoyé — vérifie le numéro et réessaie dans un instant' });
-    }
-    return res.json({ sent: true });
+    const result = await sms.sendSms(phone, `MboteCall : ton code est ${code}. Valable 5 min. Ne le partage jamais.`);
+    if (!result.ok) return res.status(502).json({ error: 'SMS non envoyé — vérifie le numéro et réessaie' });
   }
-
   if (DEMO()) {
     console.log(`📲 [DEMO] OTP pour ${phone} : ${code}`);
     return res.json({ sent: true, demo_code: code });
   }
-  // PRODUCTION sans canal SMS configuré : on refuse clairement.
-  return res.status(503).json({ error: 'Envoi SMS non configuré sur le serveur (variables AT_USERNAME / AT_API_KEY)' });
+  res.json({ sent: true });
 }));
 
 /* 2) Vérifier le code → compte créé si nouveau → JWT */
 r.post('/verify-otp', limitOtpTry, ah(async (req, res) => {
   const phone = normalizePhone(req.body.phone);
   const code = String(req.body.code || '');
+  if (!phone || !/^\d{6}$/.test(code)) return res.status(400).json({ error: 'Numéro ou code invalide' });
   const row = await db.get('SELECT * FROM otps WHERE phone = ?', [phone]);
 
   if (!row || row.code !== code) return res.status(401).json({ error: 'Code incorrect' });
@@ -76,10 +71,12 @@ r.post('/verify-otp', limitOtpTry, ah(async (req, res) => {
   let isNew = false;
   if (!user) {
     isNew = true;
+    const name = String(req.body.name || '').trim();
+    if (name.length > 60) return res.status(400).json({ error: 'Le nom ne peut pas dépasser 60 caractères' });
     const id = uid('u');
     await db.tx(async (t) => {
       await t.run('INSERT INTO users(id, phone, name, created_at) VALUES(?,?,?,?)',
-        [id, phone, req.body.name || '', now()]);
+        [id, phone, name, now()]);
       // 🎁 Bonus de bienvenue : 0,50 $
       await t.run('INSERT INTO wallets(user_id, balance_cents) VALUES(?, 50)', [id]);
       await t.run(
@@ -94,6 +91,8 @@ r.post('/verify-otp', limitOtpTry, ah(async (req, res) => {
   }
   if (user.status === 'blocked') return res.status(403).json({ error: 'Compte bloqué — contactez le support' });
 
+  await shop.claimGiftPlans(user.id, user.phone);
+
   const wallet = await db.get('SELECT * FROM wallets WHERE user_id = ?', [user.id]);
   res.json({
     token: sign(user),
@@ -103,138 +102,129 @@ r.post('/verify-otp', limitOtpTry, ah(async (req, res) => {
   });
 }));
 
-/* 3) Profil */
-r.get('/me', requireAuth, ah(async (req, res) => {
-  const w = await db.get('SELECT * FROM wallets WHERE user_id = ?', [req.user.id]);
-  res.json({
-    user: {
-      id: req.user.id, phone: req.user.phone, name: req.user.name,
-      country: req.user.country, avatar: req.user.avatar || null,
-    },
-    balance_cents: w.balance_cents,
-    currency: w.currency,
-  });
-}));
-
-r.put('/me', requireAuth, ah(async (req, res) => {
-  if (req.body.name !== undefined) {
-    const name = String(req.body.name || '').slice(0, 60);
-    await db.run('UPDATE users SET name = ? WHERE id = ?', [name, req.user.id]);
-  }
-  // 📷 Photo de profil : data-URI compressée côté app (max ~300 Ko)
-  if (req.body.avatar !== undefined) {
-    const av = String(req.body.avatar || '');
-    if (av && (!av.startsWith('data:image/') || av.length > 400000))
-      return res.status(400).json({ error: 'Photo invalide ou trop lourde' });
-    await db.run('UPDATE users SET avatar = ? WHERE id = ?', [av || null, req.user.id]);
-  }
-  res.json({ ok: true });
-}));
-
-/* 🔔 Jeton de notification Firebase (appels app fermée)
- * L'app l'envoie après connexion ; le serveur s'en sert pour réveiller
- * ce téléphone quand quelqu'un l'appelle et que l'app est fermée. */
-r.post('/fcm-token', requireAuth, ah(async (req, res) => {
-  const token = String(req.body.token || '').slice(0, 4096);
-  // 📱 Un jeton = UN téléphone = UN compte : si ce téléphone change de compte,
-  // l'ancien compte ne doit plus recevoir ses notifications (confidentialité).
-  if (token) {
-    await db.run('UPDATE users SET fcm_token = NULL WHERE fcm_token = ? AND id != ?',
-      [token, req.user.id]);
-  }
-  await db.run('UPDATE users SET fcm_token = ? WHERE id = ?',
-    [token || null, req.user.id]);
-  // 🔎 Diagnostic notifications : confirme que CE téléphone s'est bien enregistré
-  console.log(`📲 [PUSH] Jeton FCM ${token ? 'enregistré' : 'EFFACÉ'} pour ${req.user.phone} (${String(token).slice(0, 14)}…)`);
-  res.json({ ok: true });
-}));
-
-/* ============================================================
- * 🔐 RÉINITIALISATION DU CODE PIN — protocole de sécurité strict
- * ============================================================
- * Seule la PERSONNE HABILITÉE peut réinitialiser :
- *   1. être connecté sur l'appareil (jeton du compte exigé), ET
- *   2. recevoir un code SMS dédié sur le numéro du compte (la SIM) ;
- *   3. code valable 5 minutes, usage unique, 3 essais maximum ;
- *   4. après 3 codes faux → réinitialisation BLOQUÉE 30 minutes ;
- *   5. le code n'est JAMAIS renvoyé dans la réponse de l'API
- *      (même en mode démo : il n'apparaît que dans les journaux) ;
- *   6. chaque étape est journalisée, et le titulaire est averti par
- *      notification quand son PIN a été réinitialisé.
- */
-const pinTries = new Map(); // phone → { n, lockUntil }
-
-const limitPinReset = rateLimit({
-  windowMs: 10 * 60_000, max: 3,
-  key: (req) => 'pin-reset:' + (req.user ? req.user.phone : req.ip),
-  message: 'Trop de demandes — patiente 10 minutes puis réessaie',
-});
-
-r.post('/pin-reset/request', requireAuth, limitPinReset, ah(async (req, res) => {
-  const lock = pinTries.get(req.user.phone);
-  if (lock && lock.lockUntil > now()) {
-    return res.status(429).json({
-      error: 'Réinitialisation bloquée après 3 codes faux — réessaie dans 30 minutes' });
-  }
-  const code = String(Math.floor(100000 + Math.random() * 900000));
-  await db.run(
-    'INSERT INTO otps(phone, code, expires_at) VALUES(?,?,?) ON CONFLICT(phone) DO UPDATE SET code=?, expires_at=?',
-    ['pin:' + req.user.phone, code, now() + 5 * 60_000, code, now() + 5 * 60_000]);
-  // ⚠️ SÉCURITÉ : le code n'apparaît JAMAIS dans la réponse API.
-  // 📲 SMS réel via Africa's Talking si configuré.
+/* Réinitialisation du verrou PIN local après vérification SMS dédiée. */
+r.post('/pin-reset/request', requireAuth, limitPinAsk, ah(async (req, res) => {
+  const state = pinAttempts.get(req.user.phone);
+  if (state?.lockUntil > now())
+    return res.status(429).json({ error: 'Réinitialisation bloquée après 3 codes faux — réessaie dans 30 minutes' });
+  if (!DEMO() && !sms.enabled())
+    return res.status(503).json({ error: 'Envoi SMS non configuré sur le serveur' });
+  const code = String(crypto.randomInt(100000, 1000000));
+  const expires = now() + 5 * 60_000;
   if (sms.enabled()) {
-    const envoi = await sms.sendSms(
-      req.user.phone,
-      `MboteCall: code de reinitialisation PIN ${code}. Valable 5 min. Si ce n'est pas toi, ignore ce message.`
-    );
-    if (!DEMO() && !envoi.ok) {
-      return res.status(502).json({ error: 'SMS non envoyé — réessaie dans un instant' });
-    }
+    const result = await sms.sendSms(req.user.phone,
+      `MboteCall : code de réinitialisation PIN ${code}. Valable 5 min. Si ce n’est pas toi, ignore ce message.`);
+    if (!result.ok) return res.status(502).json({ error: 'SMS non envoyé — réessaie dans un instant' });
   }
-  if (DEMO() || !sms.enabled()) {
-    // Visible uniquement dans les journaux serveur (jamais en prod avec SMS actifs)
-    console.log(`🔐 [SÉCURITÉ] Code réinitialisation PIN pour ${req.user.phone} : ${code} (5 min, 3 essais)`);
-  }
+  await db.run(
+    'INSERT INTO otps(phone,code,expires_at) VALUES(?,?,?) ON CONFLICT(phone) DO UPDATE SET code=?,expires_at=?',
+    ['pin:' + req.user.phone, code, expires, code, expires],
+  );
+  if (DEMO()) console.log(`🔐 [DEMO] Code de réinitialisation PIN pour ${req.user.phone} : ${code}`);
   res.json({ sent: true });
 }));
 
 r.post('/pin-reset/verify', requireAuth, ah(async (req, res) => {
   const phone = req.user.phone;
-  const t = pinTries.get(phone) || { n: 0, lockUntil: 0 };
-  if (t.lockUntil > now()) {
-    return res.status(429).json({
-      error: 'Réinitialisation bloquée — réessaie dans 30 minutes' });
-  }
-  const row = await db.get('SELECT * FROM otps WHERE phone = ?', ['pin:' + phone]);
+  const state = pinAttempts.get(phone) || { count: 0, lockUntil: 0 };
+  if (state.lockUntil > now())
+    return res.status(429).json({ error: 'Réinitialisation bloquée — réessaie dans 30 minutes' });
   const code = String(req.body.code || '');
-  if (!row || row.expires_at < now()) {
+  if (!/^\d{6}$/.test(code)) return res.status(400).json({ error: 'Code invalide' });
+  const row = await db.get('SELECT code,expires_at FROM otps WHERE phone=?', ['pin:' + phone]);
+  if (!row || row.expires_at < now())
     return res.status(401).json({ error: 'Code expiré — redemande un code' });
-  }
   if (row.code !== code) {
-    t.n++;
-    if (t.n >= 3) {
-      t.n = 0;
-      t.lockUntil = now() + 30 * 60_000;
-      pinTries.set(phone, t);
-      await db.run('DELETE FROM otps WHERE phone = ?', ['pin:' + phone]);
-      console.log(`🔐 [SÉCURITÉ] 3 codes faux — réinitialisation PIN bloquée 30 min pour ${phone}`);
+    state.count += 1;
+    if (state.count >= 3) {
+      state.count = 0;
+      state.lockUntil = now() + 30 * 60_000;
+      await db.run('DELETE FROM otps WHERE phone=?', ['pin:' + phone]);
+      pinAttempts.set(phone, state);
       return res.status(429).json({ error: '3 codes faux — réinitialisation bloquée 30 minutes' });
     }
-    pinTries.set(phone, t);
-    console.log(`🔐 [SÉCURITÉ] Code PIN faux pour ${phone} (essai ${t.n}/3)`);
-    return res.status(401).json({ error: `Code incorrect — il reste ${3 - t.n} essai(s)` });
+    pinAttempts.set(phone, state);
+    return res.status(401).json({ error: `Code incorrect — il reste ${3 - state.count} essai(s)` });
   }
-  // ✅ Personne habilitée confirmée : usage unique + journal + alerte
-  await db.run('DELETE FROM otps WHERE phone = ?', ['pin:' + phone]);
-  pinTries.delete(phone);
-  console.log(`🔐 [SÉCURITÉ] PIN réinitialisé pour ${phone} — ${new Date().toISOString()}`);
-  try {
-    const push = require('../services/push');
-    if (push.enabled() && req.user.fcm_token) {
-      push.sendInfoPush(req.user.fcm_token, 'Code PIN réinitialisé',
-        'Le verrou de ton app MboteCall vient d\'être réinitialisé. Si ce n\'est pas toi, contacte le support.');
-    }
-  } catch (_) {}
+  await db.run('DELETE FROM otps WHERE phone=?', ['pin:' + phone]);
+  pinAttempts.delete(phone);
+  res.json({ ok: true });
+}));
+
+/* 3) Profil */
+r.get('/me', requireAuth, ah(async (req, res) => {
+  const w = await db.get('SELECT * FROM wallets WHERE user_id = ?', [req.user.id]);
+  res.json({
+    user: {
+      id: req.user.id,
+      phone: req.user.phone,
+      name: req.user.name,
+      country: req.user.country,
+      avatar: req.user.avatar || null,
+      presence_visible: req.user.presence_visible !== 0,
+      notifications_enabled: req.user.notifications_enabled !== 0,
+    },
+    balance_cents: w?.balance_cents ?? 0,
+    currency: w?.currency || 'USD',
+  });
+}));
+
+r.put('/me', requireAuth, ah(async (req, res) => {
+  const fields = [];
+  const params = [];
+  if (Object.prototype.hasOwnProperty.call(req.body, 'name')) {
+    const name = String(req.body.name ?? '').trim();
+    if (name.length < 2 || name.length > 60)
+      return res.status(400).json({ error: 'Le nom doit contenir de 2 à 60 caractères' });
+    fields.push('name = ?');
+    params.push(name);
+  }
+  if (Object.prototype.hasOwnProperty.call(req.body, 'avatar')) {
+    const avatar = String(req.body.avatar ?? '');
+    if (avatar && (!/^data:image\/(jpeg|png|webp);base64,[A-Za-z0-9+/]+=*$/.test(avatar) || avatar.length > 420000))
+      return res.status(400).json({ error: 'Photo invalide ou trop volumineuse' });
+    fields.push('avatar = ?');
+    params.push(avatar || null);
+  }
+  if (Object.prototype.hasOwnProperty.call(req.body, 'presence_visible')) {
+    if (typeof req.body.presence_visible !== 'boolean')
+      return res.status(400).json({ error: 'Préférence de présence invalide' });
+    fields.push('presence_visible = ?');
+    params.push(req.body.presence_visible ? 1 : 0);
+  }
+  if (Object.prototype.hasOwnProperty.call(req.body, 'notifications_enabled')) {
+    if (typeof req.body.notifications_enabled !== 'boolean')
+      return res.status(400).json({ error: 'Préférence de notification invalide' });
+    fields.push('notifications_enabled = ?');
+    params.push(req.body.notifications_enabled ? 1 : 0);
+  }
+  if (!fields.length) return res.status(400).json({ error: 'Aucune modification reçue' });
+  params.push(req.user.id);
+  await db.run(`UPDATE users SET ${fields.join(', ')} WHERE id = ?`, params);
+  res.json({ ok: true });
+}));
+
+/* Jetons push par appareil. Un jeton vide déconnecte tous les appareils du compte. */
+r.post('/fcm-token', requireAuth, ah(async (req, res) => {
+  const token = String(req.body.token || '').trim();
+  if (!token) {
+    await db.run('DELETE FROM device_tokens WHERE user_id = ?', [req.user.id]);
+    return res.json({ ok: true, removed: true });
+  }
+  if (token.length > 4096 || /\s/.test(token))
+    return res.status(400).json({ error: 'Jeton de notification invalide' });
+  await db.run(
+    `INSERT INTO device_tokens(token, user_id, updated_at) VALUES(?,?,?)
+     ON CONFLICT(token) DO UPDATE SET user_id=excluded.user_id, updated_at=excluded.updated_at`,
+    [token, req.user.id, now()],
+  );
+  res.json({ ok: true });
+}));
+
+r.delete('/fcm-token', requireAuth, ah(async (req, res) => {
+  const token = String(req.query.token || '').trim();
+  if (!token) return res.status(400).json({ error: 'Jeton de notification requis' });
+  await db.run('DELETE FROM device_tokens WHERE token=? AND user_id=?', [token, req.user.id]);
   res.json({ ok: true });
 }));
 

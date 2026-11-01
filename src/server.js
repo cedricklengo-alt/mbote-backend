@@ -1,23 +1,25 @@
 /**
  * ============================================================
  *  MBOTE! — Serveur principal (monolithe modulaire)
- *  Modules : auth · wallet · rating · calls · contacts · admin · feed
- *           présence · dial-later · invite
+ *  Modules : auth · wallet · rating · calls · contacts · admin · feed · rtc
  * ============================================================
  */
 require('dotenv').config();
 const http    = require('http');
 const express = require('express');
-const path = require('path');
-const db = require('./db');
-const rtcWs = require('./modules/rtc.ws');
+const path    = require('path');
+const db      = require('./db');
+const rtcWs   = require('./modules/rtc.ws');
 
 const app = express();
-app.use(express.json());
+app.use(express.json({
+  limit: '12mb',
+  verify: (req, _res, buffer) => { req.rawBody = Buffer.from(buffer); },
+}));
 
 // Journal des requêtes (diagnostic)
 app.use((req, res, next) => {
-  console.log(`➡️  ${req.method} ${req.url}`);
+  console.log(`➡️  ${req.method} ${req.path}`);
   next();
 });
 
@@ -36,15 +38,18 @@ app.use('/api/wallet',   require('./modules/wallet.routes'));
 app.use('/api/rates',    require('./modules/rating.routes').router);
 app.use('/api/calls',    require('./modules/calls.routes'));
 app.use('/api/contacts', require('./modules/contacts.routes'));
-app.use('/api/referral',   require('./modules/referral.routes'));
-app.use('/api/payments',   require('./modules/payments.routes')); // webhook agrégateur (public)
-app.use('/api/admin',      require('./modules/admin.routes'));
-app.use('/api/feed',       require('./modules/feed.routes'));
-app.use('/api/presence',   require('./modules/presence.routes'));
-app.use('/api/dial-later', require('./modules/dial_later.routes'));
-// Lien d'invitation magique (Feature B) — redirect public
-app.use('/invite',         require('./modules/invite.routes'));
-
+app.use('/api/referral', require('./modules/referral.routes'));
+app.use('/api/payments', require('./modules/payments.routes')); // webhook agrégateur (public)
+app.use('/api/admin',    require('./modules/admin.routes'));
+app.use('/api/feed',     require('./modules/feed.routes'));
+app.use('/api/rtc',      require('./modules/rtc.routes'));      // ICE servers + config WebRTC
+app.use('/api/packages', require('./modules/packages.routes'));
+app.use('/api/airtime',  require('./modules/airtime.routes'));
+app.use('/api/i18n',     require('./modules/i18n.routes'));
+app.use('/api/shop',     require('./modules/shop.routes'));
+const messageRoutes = require('./modules/messages.routes');
+app.use('/api/messages', messageRoutes.router);
+app.use('/api/lokota',   messageRoutes.lokota);
 
 /* ---- Upload média (photos / clips) ---- */
 const { requireAuth } = require('./middleware/auth');
@@ -88,19 +93,26 @@ app.get('/api/health', (req, res) => res.json({
 
 /* ---- Gestion d'erreurs ---- */
 app.use((err, req, res, next) => {
-  console.error('💥', err);
-  res.status(500).json({ error: 'Erreur interne' });
+  const status = Number(err.status);
+  if (!status || status >= 500) console.error('💥', err);
+  res.status(status >= 400 && status < 500 ? status : 500).json({
+    error: status >= 400 && status < 500 ? err.message : 'Erreur interne',
+  });
 });
 
+/* ---- Démarrage ---- */
 const PORT = process.env.PORT || 4000;
 const server = http.createServer(app);
 
 db.init().then(() => {
-  rtcWs.init(server);           // ← WebSocket RTC (appels + présence + groupes)
+  // Attacher le serveur WebSocket après l'init DB
+  rtcWs.init(server);
+
   server.listen(PORT, '0.0.0.0', () => {
     console.log(`✅ MBOTE! backend démarré sur le port ${PORT}`);
     console.log(`   Base de données : ${db.name}`);
     console.log(`   Console admin   : http://localhost:${PORT}/admin`);
+    console.log(`   WebSocket RTC   : ws://localhost:${PORT}/ws`);
     console.log(`   Mode démo       : ${String(process.env.DEMO_MODE || 'true')}`);
   });
 }).catch((e) => {

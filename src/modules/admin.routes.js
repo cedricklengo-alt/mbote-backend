@@ -132,40 +132,6 @@ r.delete('/promos/:id', requireAdmin, ah(async (req, res) => {
   res.json({ ok: true });
 }));
 
-/* ---- Forfaits (CRUD) ---- */
-r.get('/packages', requireAdmin, ah(async (req, res) => {
-  res.json(await db.all('SELECT * FROM packages ORDER BY price_cents'));
-}));
-
-r.post('/packages', requireAdmin, ah(async (req, res) => {
-  const { name, price_cents, prefix = '', minutes = 0, days = 30 } = req.body;
-  if (!name || !(price_cents > 0) || !(days > 0))
-    return res.status(400).json({ error: 'Nom, prix et durée requis' });
-  const row = await db.get(
-    'INSERT INTO packages(name,price_cents,prefix,minutes,days) VALUES(?,?,?,?,?) RETURNING id',
-    [String(name).slice(0, 80), Math.round(price_cents), String(prefix).replace(/\D/g, ''),
-     Math.max(0, Math.round(minutes)), Math.round(days)]);
-  res.json({ id: row.id });
-}));
-
-r.put('/packages/:id', requireAdmin, ah(async (req, res) => {
-  if (req.body.active !== undefined)
-    await db.run('UPDATE packages SET active = ? WHERE id = ?', [req.body.active ? 1 : 0, req.params.id]);
-  res.json({ ok: true });
-}));
-
-r.delete('/packages/:id', requireAdmin, ah(async (req, res) => {
-  await db.run('DELETE FROM packages WHERE id = ?', [req.params.id]);
-  res.json({ ok: true });
-}));
-
-/* ---- Recharges airtime ---- */
-r.get('/airtime', requireAdmin, ah(async (req, res) => {
-  res.json(await db.all(`
-    SELECT a.*, u.phone AS user_phone FROM airtime_topups a JOIN users u ON u.id = a.user_id
-    ORDER BY a.created_at DESC LIMIT 200`));
-}));
-
 /* ---- CDR & transactions ---- */
 r.get('/cdrs', requireAdmin, ah(async (req, res) => {
   res.json(await db.all(`

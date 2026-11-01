@@ -43,14 +43,26 @@ async function main() {
       console.log(`✅ ${RATES.length} tarifs insérés`);
     }
 
-    // 📦 Forfaits par défaut (modifiables depuis la console admin)
-    const pk = await t.get('SELECT COUNT(*) n FROM packages');
-    if (Number(pk.n) === 0) {
+    const packages = await t.get('SELECT COUNT(*) n FROM packages');
+    if (Number(packages.n) === 0) {
       await t.run('INSERT INTO packages(name,price_cents,prefix,minutes,days) VALUES(?,?,?,?,?)',
         ['Pack RDC 100 minutes', 700, '243', 100, 30]);
       await t.run('INSERT INTO packages(name,price_cents,prefix,minutes,days) VALUES(?,?,?,?,?)',
         ['Pass RDC Illimité 30 jours', 1500, '243', 0, 30]);
-      console.log('✅ 2 forfaits par défaut insérés');
+    }
+
+    const shopCount = await t.get('SELECT COUNT(*) n FROM shop_packages');
+    if (Number(shopCount.n) === 0) {
+      const created = now();
+      await t.run(`INSERT INTO shop_packages
+        (name,description,price_cents,currency,minutes,days,prefix,category,sort_order,created_at)
+        VALUES(?,?,?,?,?,?,?,?,?,?)`,
+      ['Pack RDC 100 minutes', 'Appels vers la RDC · valable 30 jours', 700, 'USD', 100, 30, '243', 'minutes', 1, created]);
+      await t.run(`INSERT INTO shop_packages
+        (name,description,price_cents,currency,minutes,days,prefix,category,sort_order,created_at)
+        VALUES(?,?,?,?,?,?,?,?,?,?)`,
+      ['Pass RDC Illimité 30 jours', 'Appels vers la RDC · valable 30 jours', 1500, 'USD', 0, 30, '243', 'minutes', 2, created]);
+      console.log('✅ Catalogue boutique initialisé');
     }
 
     // Admin : créé s'il n'existe pas, et mot de passe RESYNCHRONISÉ à chaque démarrage

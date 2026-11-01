@@ -3,6 +3,7 @@ const express = require('express');
 const db = require('../db');
 const { uid, normalizePhone, ah } = require('../util');
 const { requireAuth } = require('../middleware/auth');
+const { isOnline } = require('./rtc.ws');
 
 const r = express.Router();
 
@@ -10,10 +11,32 @@ r.get('/', requireAuth, ah(async (req, res) => {
   res.json(await db.all('SELECT * FROM contacts WHERE user_id = ? ORDER BY name', [req.user.id]));
 }));
 
+r.post('/check', requireAuth, ah(async (req, res) => {
+  const input = Array.isArray(req.body.phones) ? req.body.phones.slice(0, 300) : [];
+  const normalized = [...new Set(input.map(normalizePhone).filter(Boolean))];
+  if (!normalized.length) return res.json({ mbote: {} });
+  const peers = await db.all(
+    `SELECT phone FROM users WHERE status='active' AND phone IN (${normalized.map(() => '?').join(',')})`,
+    normalized,
+  );
+  const available = new Set(peers.map((p) => p.phone));
+  const mbote = {};
+  for (const raw of input) {
+    const phone = normalizePhone(raw);
+    if (phone && available.has(phone)) mbote[String(raw)] = phone;
+  }
+  res.json({ mbote });
+}));
+
 r.post('/', requireAuth, ah(async (req, res) => {
   const phone = normalizePhone(req.body.phone);
   const name = String(req.body.name || '').trim().slice(0, 60);
   if (!phone || !name) return res.status(400).json({ error: 'Nom et numéro requis' });
+  const existing = await db.get('SELECT id FROM contacts WHERE user_id=? AND phone=?', [req.user.id, phone]);
+  if (existing) {
+    await db.run('UPDATE contacts SET name=? WHERE id=?', [name, existing.id]);
+    return res.json({ id: existing.id, name, phone });
+  }
   const id = uid('ct');
   await db.run('INSERT INTO contacts(id,user_id,name,phone) VALUES(?,?,?,?)',
     [id, req.user.id, name, phone]);
@@ -25,52 +48,47 @@ r.delete('/:id', requireAuth, ah(async (req, res) => {
   res.json({ ok: true });
 }));
 
-/** 📒 Vérification en lot : lesquels de ces numéros ont un compte MboteCall ?
- *  Body : { phones: ["+243 81 234 56 78", "081 234 5678", …] } (max 500)
- *  Match par les 9 derniers chiffres → tolère les formats locaux (081…)
- *  et internationaux (+24381…).
- *  Réponse : { mbote: { "<numéro envoyé>": "+2438123456 78 normalisé", … } } */
-r.post('/check', requireAuth, ah(async (req, res) => {
-  const phones = Array.isArray(req.body.phones) ? req.body.phones.slice(0, 500) : [];
-  // suffixe 9 chiffres → liste des numéros bruts envoyés
-  const bySuffix = new Map();
-  for (const raw of phones) {
-    const digits = String(raw).replace(/\D/g, '');
-    if (digits.length < 9) continue;
-    const suf = digits.slice(-9);
-    if (!bySuffix.has(suf)) bySuffix.set(suf, []);
-    bySuffix.get(suf).push(String(raw));
-  }
-  const mbote = {};
-  const sufs = [...bySuffix.keys()];
-  if (sufs.length) {
-    const rightExpr = db.name === 'postgres' ? 'RIGHT(phone, 9)' : 'substr(phone, -9)';
-    // par lots de 100 pour rester léger
-    for (let i = 0; i < sufs.length; i += 100) {
-      const batch = sufs.slice(i, i + 100);
-      const rows = await db.all(
-        `SELECT phone, ${rightExpr} AS suf FROM users
-         WHERE role = 'user' AND status = 'active' AND ${rightExpr} IN (${batch.map(() => '?').join(',')})`,
-        batch);
-      for (const row of rows) {
-        // on ne se signale pas soi-même
-        if (row.phone === req.user.phone) continue;
-        for (const raw of bySuffix.get(row.suf) || []) mbote[raw] = row.phone;
-      }
-    }
-  }
-  res.json({ mbote });
-}));
-
-/* 👤 v2.3 — Profil public d'un proche (nom, photo, ancienneté)
- * Consultable depuis une conversation ou un écran d'appel. */
 r.get('/profile/:phone', requireAuth, ah(async (req, res) => {
   const phone = normalizePhone(req.params.phone);
   if (!phone) return res.status(400).json({ error: 'Numéro invalide' });
-  const u = await db.get(
-    `SELECT name, avatar, created_at FROM users WHERE phone = ? AND role = 'user' AND status = 'active'`, [phone]);
-  if (!u) return res.status(404).json({ error: 'Pas encore sur MboteCall' });
-  res.json({ phone, name: u.name || '', avatar: u.avatar || null, member_since: u.created_at });
+  const peer = await db.get('SELECT id,phone,name,avatar,created_at,presence_visible,last_seen_at FROM users WHERE phone=? AND status=\'active\'', [phone]);
+  if (!peer) return res.status(404).json({ error: 'Compte MboteCall introuvable' });
+  const visible = peer.presence_visible !== 0;
+  const reminder = await db.get('SELECT notified_at FROM presence_reminders WHERE owner_id=? AND target_id=?', [req.user.id, peer.id]);
+  res.json({
+    id: peer.id, phone: peer.phone, name: peer.name, avatar: peer.avatar || null,
+    member_since: peer.created_at,
+    created_at: peer.created_at,
+    presence_visible: visible,
+    online: visible && isOnline(peer.phone),
+    last_seen_at: visible ? peer.last_seen_at : null,
+    reminder_active: !!(reminder && !reminder.notified_at),
+  });
+}));
+
+r.post('/:phone/reminder', requireAuth, ah(async (req, res) => {
+  const phone = normalizePhone(req.params.phone);
+  if (!phone || phone === req.user.phone) return res.status(400).json({ error: 'Contact invalide' });
+  const peer = await db.get('SELECT id,phone,name,presence_visible FROM users WHERE phone=? AND status=\'active\'', [phone]);
+  if (!peer) return res.status(404).json({ error: 'Compte MboteCall introuvable' });
+  if (peer.presence_visible === 0) return res.status(403).json({ error: 'Ce contact masque sa présence' });
+  if (isOnline(phone)) {
+    await db.run('DELETE FROM presence_reminders WHERE owner_id=? AND target_id=?', [req.user.id, peer.id]);
+    return res.json({ ok: true, already_online: true, active: false });
+  }
+  await db.run(`
+    INSERT INTO presence_reminders(owner_id,target_id,created_at,notified_at) VALUES(?,?,?,NULL)
+    ON CONFLICT(owner_id,target_id) DO UPDATE SET created_at=excluded.created_at,notified_at=NULL
+  `, [req.user.id, peer.id, Date.now()]);
+  res.json({ ok: true, already_online: false, active: true });
+}));
+
+r.delete('/:phone/reminder', requireAuth, ah(async (req, res) => {
+  const phone = normalizePhone(req.params.phone);
+  if (!phone) return res.status(400).json({ error: 'Contact invalide' });
+  const peer = await db.get('SELECT id FROM users WHERE phone=?', [phone]);
+  if (peer) await db.run('DELETE FROM presence_reminders WHERE owner_id=? AND target_id=?', [req.user.id, peer.id]);
+  res.json({ ok: true, active: false });
 }));
 
 module.exports = r;

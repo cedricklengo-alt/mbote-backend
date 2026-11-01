@@ -106,6 +106,12 @@ async function createShopPayment(orderId, method, phone) {
     throw Object.assign(new Error('Commande expirée'), { status: 410 });
   }
 
+  const pending = await db.get(
+    `SELECT * FROM shop_payments WHERE order_id=? AND status='pending' ORDER BY created_at DESC LIMIT 1`,
+    [orderId],
+  );
+  if (pending) return pending;
+
   const provider = getPayProvider();
   const payId    = uid('spay');
   const reference = 'SHOP-' + payId.slice(5).toUpperCase();
@@ -198,29 +204,40 @@ async function activateOrder(paymentId, confirmedAmount) {
     const unlimited    = pkg.minutes === 0 ? 1 : 0;
     const planId       = uid('upl');
 
-    // 6. Créer le plan utilisateur
-    await t.run(
-      `INSERT INTO user_plans
-         (id, user_id, order_id, package_id, package_name, prefix,
-          minutes_total, remaining_sec, sms_total, remaining_sms,
-          unlimited, activated_at, expires_at, status)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active')`,
-      [
-        planId,
-        pay.user_id,
-        order.id,
-        order.package_id,
-        order.package_name,
-        pkg.prefix || '',
-        pkg.minutes || 0,
-        remainingSec,
-        pkg.sms_count || 0,
-        pkg.sms_count || 0,
-        unlimited,
-        activatedAt,
-        expiresAt,
-      ]
-    );
+    // 6. Créer le plan pour l'acheteur ou le bénéficiaire vérifié.
+    let planUserId = pay.user_id;
+    let isGift = 0;
+    if (order.recipient_phone) {
+      const recipient = await t.get('SELECT id,status FROM users WHERE phone=?', [order.recipient_phone]);
+      if (recipient && recipient.status !== 'blocked') {
+        planUserId = recipient.id;
+        isGift = 1;
+      } else {
+        // Le bénéficiaire peut créer son compte plus tard; il devra vérifier ce numéro par OTP.
+        await t.run(
+          `INSERT INTO pending_gifts(order_id,recipient_phone,recipient_name,created_at)
+           VALUES(?,?,?,?) ON CONFLICT(order_id) DO NOTHING`,
+          [order.id, order.recipient_phone, order.recipient_name || null, activatedAt],
+        );
+      }
+    }
+    if (!order.recipient_phone || isGift) {
+      await t.run(
+        `INSERT INTO user_plans
+           (id, user_id, order_id, package_id, package_name, prefix,
+            minutes_total, remaining_sec, sms_total, remaining_sms,
+            unlimited, recipient_phone, is_gift, activated_at, expires_at, status)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active')
+         ON CONFLICT(order_id) DO NOTHING`,
+        [
+          planId, planUserId, order.id, order.package_id, order.package_name,
+          pkg.prefix || '', pkg.minutes || 0, remainingSec,
+          pkg.sms_count || 0, pkg.sms_count || 0, unlimited,
+          isGift ? order.recipient_phone : null, isGift, activatedAt, expiresAt,
+        ]
+      );
+    }
+    await t.run('UPDATE shop_orders SET activated_at=? WHERE id=?', [activatedAt, order.id]);
 
     // 7. Transaction financière pour la traçabilité
     await t.run(
@@ -290,6 +307,43 @@ async function userAllPlans(userId) {
     `SELECT * FROM user_plans WHERE user_id = ? ORDER BY activated_at DESC`,
     [userId]
   );
+}
+
+/** Délivre après connexion les cadeaux déjà payés pour le numéro vérifié. */
+async function claimGiftPlans(userId, phone) {
+  return db.tx(async (t) => {
+    const gifts = await t.all(`
+      SELECT g.order_id,g.recipient_phone,o.package_id,o.package_name,o.package_snapshot
+      FROM pending_gifts g JOIN shop_orders o ON o.id=g.order_id
+      WHERE g.recipient_phone=? AND g.claimed_at IS NULL AND o.status='paid'
+      ORDER BY g.created_at ASC
+    `, [phone]);
+    const claimed = [];
+    for (const gift of gifts) {
+      let pkg;
+      try { pkg = JSON.parse(gift.package_snapshot); } catch { pkg = {}; }
+      const activatedAt = now();
+      const days = Math.max(1, Math.min(365, Number(pkg.days) || 30));
+      const minutes = Math.max(0, Math.min(100000, Number(pkg.minutes) || 0));
+      await t.run(`
+        INSERT INTO user_plans
+          (id,user_id,order_id,package_id,package_name,prefix,minutes_total,remaining_sec,
+           sms_total,remaining_sms,unlimited,recipient_phone,is_gift,activated_at,expires_at,status)
+        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'active')
+        ON CONFLICT(order_id) DO NOTHING
+      `, [
+        uid('upl'), userId, gift.order_id, gift.package_id, gift.package_name,
+        pkg.prefix || '', minutes, minutes * 60, Number(pkg.sms_count) || 0,
+        Number(pkg.sms_count) || 0, minutes === 0 ? 1 : 0, phone, 1,
+        activatedAt, activatedAt + days * 24 * 60 * 60 * 1000,
+      ]);
+      await t.run('UPDATE pending_gifts SET user_id=?,claimed_at=? WHERE order_id=? AND claimed_at IS NULL',
+        [userId, activatedAt, gift.order_id]);
+      await t.run('UPDATE shop_orders SET activated_at=? WHERE id=?', [activatedAt, gift.order_id]);
+      claimed.push(gift.order_id);
+    }
+    return claimed;
+  });
 }
 
 /**
@@ -409,6 +463,7 @@ module.exports = {
   pollAndActivate,
   userActivePlans,
   userAllPlans,
+  claimGiftPlans,
   consumeSeconds,
   consumeSms,
 };

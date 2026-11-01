@@ -13,6 +13,10 @@ CREATE TABLE IF NOT EXISTS users (
   country    TEXT DEFAULT 'CD',
   role       TEXT DEFAULT 'user',
   status     TEXT DEFAULT 'active',
+  avatar     TEXT,
+  presence_visible INTEGER NOT NULL DEFAULT 1,
+  notifications_enabled INTEGER NOT NULL DEFAULT 1,
+  last_seen_at INTEGER,
   password_hash TEXT,
   created_at INTEGER NOT NULL
 );
@@ -43,6 +47,7 @@ CREATE TABLE IF NOT EXISTS calls (
   id                  TEXT PRIMARY KEY,
   user_id             TEXT NOT NULL REFERENCES users(id),
   callee              TEXT NOT NULL,
+  direction           TEXT NOT NULL DEFAULT 'outgoing',
   destination         TEXT,
   price_per_min_cents INTEGER NOT NULL,
   max_sec             INTEGER NOT NULL,
@@ -52,7 +57,12 @@ CREATE TABLE IF NOT EXISTS calls (
   ended_at            INTEGER,
   billed_sec          INTEGER DEFAULT 0,
   cost_cents          INTEGER DEFAULT 0,
-  hangup_cause        TEXT
+  hangup_cause        TEXT,
+  callee_user_id      TEXT,
+  rtc_mode            INTEGER NOT NULL DEFAULT 0,
+  with_video          INTEGER NOT NULL DEFAULT 0,
+  offer_sdp           TEXT,
+  push_notified_at    INTEGER
 );
 CREATE TABLE IF NOT EXISTS contacts (
   id        TEXT PRIMARY KEY,
@@ -65,32 +75,6 @@ CREATE TABLE IF NOT EXISTS otps (
   phone      TEXT PRIMARY KEY,
   code       TEXT NOT NULL,
   expires_at INTEGER NOT NULL
-);
-CREATE TABLE IF NOT EXISTS voice_notes (
-  id           TEXT PRIMARY KEY,
-  from_id      TEXT NOT NULL REFERENCES users(id),
-  to_id        TEXT NOT NULL REFERENCES users(id),
-  audio        TEXT NOT NULL,
-  duration_sec INTEGER NOT NULL DEFAULT 0,
-  lang_from    TEXT NOT NULL DEFAULT 'fr',
-  lang_to      TEXT NOT NULL DEFAULT 'ln',
-  transcript   TEXT,
-  translation  TEXT,
-  status       TEXT NOT NULL DEFAULT 'pending',
-  created_at   INTEGER NOT NULL,
-  read_at      INTEGER
-);
-CREATE TABLE IF NOT EXISTS text_messages (
-  id           TEXT PRIMARY KEY,
-  from_id      TEXT NOT NULL REFERENCES users(id),
-  to_id        TEXT NOT NULL REFERENCES users(id),
-  body         TEXT NOT NULL,
-  lang_from    TEXT NOT NULL DEFAULT 'fr',
-  lang_to      TEXT NOT NULL DEFAULT 'ln',
-  translation  TEXT,
-  status       TEXT NOT NULL DEFAULT 'pending',
-  created_at   INTEGER NOT NULL,
-  read_at      INTEGER
 );
 CREATE TABLE IF NOT EXISTS payments (
   id           TEXT PRIMARY KEY,
@@ -147,62 +131,182 @@ CREATE TABLE IF NOT EXISTS airtime_topups (
   reference    TEXT,
   created_at   INTEGER NOT NULL
 );
-CREATE TABLE IF NOT EXISTS invites (
-  id         TEXT PRIMARY KEY,
-  user_id    TEXT NOT NULL REFERENCES users(id),
-  phone      TEXT NOT NULL,
-  created_at INTEGER NOT NULL
+CREATE TABLE IF NOT EXISTS shop_packages (
+  id            INTEGER PRIMARY KEY AUTOINCREMENT,
+  name          TEXT NOT NULL,
+  description   TEXT NOT NULL DEFAULT '',
+  price_cents   INTEGER NOT NULL,
+  currency      TEXT NOT NULL DEFAULT 'USD',
+  minutes       INTEGER NOT NULL DEFAULT 0,
+  sms_count     INTEGER NOT NULL DEFAULT 0,
+  days          INTEGER NOT NULL DEFAULT 30,
+  prefix        TEXT NOT NULL DEFAULT '',
+  category      TEXT NOT NULL DEFAULT 'credit',
+  conditions    TEXT NOT NULL DEFAULT '',
+  renewable     INTEGER NOT NULL DEFAULT 0,
+  sort_order    INTEGER NOT NULL DEFAULT 0,
+  active        INTEGER NOT NULL DEFAULT 1,
+  created_at    INTEGER NOT NULL,
+  updated_at    INTEGER
 );
+CREATE TABLE IF NOT EXISTS shop_orders (
+  id               TEXT PRIMARY KEY,
+  user_id          TEXT NOT NULL REFERENCES users(id),
+  package_id       INTEGER NOT NULL,
+  package_name     TEXT NOT NULL,
+  package_snapshot TEXT NOT NULL DEFAULT '{}',
+  amount_cents     INTEGER NOT NULL,
+  currency         TEXT NOT NULL DEFAULT 'USD',
+  status           TEXT NOT NULL DEFAULT 'pending',
+  payment_id       TEXT,
+  recipient_phone  TEXT,
+  recipient_name   TEXT,
+  created_at       INTEGER NOT NULL,
+  expires_at       INTEGER NOT NULL,
+  paid_at          INTEGER,
+  activated_at     INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_shop_orders_user ON shop_orders(user_id);
+CREATE INDEX IF NOT EXISTS idx_shop_orders_status ON shop_orders(status);
+CREATE TABLE IF NOT EXISTS shop_payments (
+  id            TEXT PRIMARY KEY,
+  order_id      TEXT NOT NULL REFERENCES shop_orders(id),
+  user_id       TEXT NOT NULL REFERENCES users(id),
+  provider      TEXT NOT NULL,
+  method        TEXT NOT NULL,
+  phone         TEXT,
+  amount_cents  INTEGER NOT NULL,
+  currency      TEXT NOT NULL DEFAULT 'USD',
+  reference     TEXT NOT NULL UNIQUE,
+  order_number  TEXT,
+  status        TEXT NOT NULL DEFAULT 'pending',
+  created_at    INTEGER NOT NULL,
+  updated_at    INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_shop_pay_order ON shop_payments(order_id);
+CREATE TABLE IF NOT EXISTS user_plans (
+  id              TEXT PRIMARY KEY,
+  user_id         TEXT NOT NULL REFERENCES users(id),
+  order_id        TEXT NOT NULL REFERENCES shop_orders(id),
+  package_id      INTEGER NOT NULL,
+  package_name    TEXT NOT NULL,
+  prefix          TEXT NOT NULL DEFAULT '',
+  minutes_total   INTEGER NOT NULL DEFAULT 0,
+  remaining_sec   INTEGER NOT NULL DEFAULT 0,
+  consumed_sec    INTEGER NOT NULL DEFAULT 0,
+  sms_total       INTEGER NOT NULL DEFAULT 0,
+  remaining_sms   INTEGER NOT NULL DEFAULT 0,
+  consumed_sms    INTEGER NOT NULL DEFAULT 0,
+  unlimited       INTEGER NOT NULL DEFAULT 0,
+  recipient_phone TEXT,
+  is_gift         INTEGER NOT NULL DEFAULT 0,
+  activated_at    INTEGER NOT NULL,
+  expires_at      INTEGER NOT NULL,
+  status          TEXT NOT NULL DEFAULT 'active',
+  UNIQUE(order_id)
+);
+CREATE INDEX IF NOT EXISTS idx_user_plans_user ON user_plans(user_id, status);
+CREATE INDEX IF NOT EXISTS idx_user_plans_expires ON user_plans(expires_at);
+CREATE TABLE IF NOT EXISTS pending_gifts (
+  order_id        TEXT PRIMARY KEY REFERENCES shop_orders(id),
+  recipient_phone TEXT NOT NULL,
+  recipient_name  TEXT,
+  created_at      INTEGER NOT NULL,
+  claimed_at      INTEGER,
+  user_id         TEXT REFERENCES users(id)
+);
+CREATE INDEX IF NOT EXISTS idx_pending_gifts_phone ON pending_gifts(recipient_phone);
 
--- ── v3.2 FEED ────────────────────────────────────────────────────────────
+/* ---- Feed social ---- */
 CREATE TABLE IF NOT EXISTS posts (
-  id          TEXT PRIMARY KEY,
-  user_id     TEXT NOT NULL REFERENCES users(id),
-  type        TEXT NOT NULL DEFAULT 'texte',   -- photo|clip|texte|event
-  texte       TEXT,
-  media_url   TEXT,
-  event_title TEXT,
-  event_date  INTEGER,
-  event_lieu  TEXT,
-  event_tags  TEXT DEFAULT '[]',
-  clip_sec    INTEGER,
-  ville       TEXT,
-  visibilite  TEXT DEFAULT 'contacts',
-  origine     TEXT DEFAULT 'rdc',
-  duree       TEXT DEFAULT 'permanent',
-  likes       INTEGER DEFAULT 0,
-  comments    INTEGER DEFAULT 0,
-  created_at  INTEGER NOT NULL
+  id                 TEXT PRIMARY KEY,
+  author_id          TEXT NOT NULL REFERENCES users(id),
+  type               TEXT NOT NULL,          -- photo | clip | texte | event
+  origine            TEXT NOT NULL DEFAULT 'rdc',      -- rdc | diaspora
+  duree              TEXT NOT NULL DEFAULT 'permanent', -- h24 | permanent
+  visibilite         TEXT NOT NULL DEFAULT 'public',   -- contacts | communauté | public
+  media_url          TEXT,
+  texte              TEXT,
+  event_title        TEXT,
+  event_date         INTEGER,
+  event_lieu         TEXT,
+  event_tags         TEXT,                   -- JSON array
+  clip_duree_seconds INTEGER,
+  likes_count        INTEGER NOT NULL DEFAULT 0,
+  comments_count     INTEGER NOT NULL DEFAULT 0,
+  created_at         INTEGER NOT NULL
 );
-
 CREATE TABLE IF NOT EXISTS stories (
   id          TEXT PRIMARY KEY,
-  user_id     TEXT NOT NULL REFERENCES users(id),
-  media_url   TEXT,
-  texte       TEXT,
-  created_at  INTEGER NOT NULL
+  author_id   TEXT NOT NULL REFERENCES users(id),
+  media_url   TEXT NOT NULL,
+  created_at  INTEGER NOT NULL,
+  expires_at  INTEGER NOT NULL,
+  visibilite  TEXT NOT NULL DEFAULT 'contacts'
 );
-
 CREATE TABLE IF NOT EXISTS stories_seen (
-  story_id    TEXT NOT NULL REFERENCES stories(id),
-  user_id     TEXT NOT NULL REFERENCES users(id),
-  seen_at     INTEGER NOT NULL,
+  story_id TEXT NOT NULL REFERENCES stories(id),
+  user_id  TEXT NOT NULL REFERENCES users(id),
+  seen_at  INTEGER NOT NULL,
   PRIMARY KEY (story_id, user_id)
 );
-
 CREATE TABLE IF NOT EXISTS post_likes (
-  post_id     TEXT NOT NULL REFERENCES posts(id),
-  user_id     TEXT NOT NULL REFERENCES users(id),
-  created_at  INTEGER NOT NULL,
+  post_id    TEXT NOT NULL REFERENCES posts(id),
+  user_id    TEXT NOT NULL REFERENCES users(id),
+  created_at INTEGER NOT NULL,
   PRIMARY KEY (post_id, user_id)
 );
-
 CREATE TABLE IF NOT EXISTS post_comments (
-  id          TEXT PRIMARY KEY,
-  post_id     TEXT NOT NULL REFERENCES posts(id),
-  user_id     TEXT NOT NULL REFERENCES users(id),
-  texte       TEXT NOT NULL,
-  created_at  INTEGER NOT NULL
+  id         TEXT PRIMARY KEY,
+  post_id    TEXT NOT NULL REFERENCES posts(id),
+  author_id  TEXT NOT NULL REFERENCES users(id),
+  texte      TEXT NOT NULL,
+  created_at INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS messages (
+  id            TEXT PRIMARY KEY,
+  sender_id     TEXT NOT NULL REFERENCES users(id),
+  recipient_id  TEXT NOT NULL REFERENCES users(id),
+  client_id     TEXT,
+  kind          TEXT NOT NULL DEFAULT 'text',
+  body          TEXT NOT NULL DEFAULT '',
+  lang_from     TEXT NOT NULL DEFAULT 'fr',
+  lang_to       TEXT NOT NULL DEFAULT 'fr',
+  translation   TEXT NOT NULL DEFAULT '',
+  transcript    TEXT NOT NULL DEFAULT '',
+  media_path    TEXT,
+  media_name    TEXT,
+  media_mime    TEXT,
+  media_size    INTEGER,
+  duration_sec  INTEGER,
+  wave          TEXT,
+  created_at    INTEGER NOT NULL,
+  delivered_at  INTEGER,
+  read_at       INTEGER,
+  played_at     INTEGER,
+  deleted_at    INTEGER,
+  UNIQUE(sender_id, client_id)
+);
+CREATE INDEX IF NOT EXISTS idx_messages_sender_time ON messages(sender_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_messages_recipient_time ON messages(recipient_id, created_at);
+CREATE TABLE IF NOT EXISTS message_hidden (
+  message_id TEXT NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+  user_id    TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  hidden_at  INTEGER NOT NULL,
+  PRIMARY KEY(message_id, user_id)
+);
+CREATE TABLE IF NOT EXISTS device_tokens (
+  token TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  updated_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_device_tokens_user ON device_tokens(user_id);
+CREATE TABLE IF NOT EXISTS presence_reminders (
+  owner_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  target_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  created_at INTEGER NOT NULL,
+  notified_at INTEGER,
+  PRIMARY KEY(owner_id, target_id)
 );
 `;
 
@@ -211,133 +315,20 @@ const MIGRATIONS = [
   `ALTER TABLE users ADD COLUMN referral_code TEXT`,
   `ALTER TABLE users ADD COLUMN referred_by TEXT`,
   `ALTER TABLE users ADD COLUMN referral_rewarded INTEGER DEFAULT 0`,
-  `ALTER TABLE calls ADD COLUMN user_package_id TEXT`,
   `ALTER TABLE users ADD COLUMN avatar TEXT`,
-  `ALTER TABLE calls ADD COLUMN direction TEXT DEFAULT 'out'`,
-  `ALTER TABLE users ADD COLUMN fcm_token TEXT`,
-  `ALTER TABLE text_messages ADD COLUMN attachment TEXT`,
-  `ALTER TABLE text_messages ADD COLUMN attachment_type TEXT`,
-  `ALTER TABLE text_messages ADD COLUMN deleted INTEGER DEFAULT 0`,
-  `ALTER TABLE voice_notes ADD COLUMN deleted INTEGER DEFAULT 0`,
-  `ALTER TABLE text_messages ADD COLUMN delivered_at INTEGER`,
-  `ALTER TABLE voice_notes ADD COLUMN delivered_at INTEGER`,
-  // 🔁 v3.0 : clé d'idempotence — un renvoi après timeout ne crée plus de doublon
-  `ALTER TABLE text_messages ADD COLUMN client_id TEXT`,
-  `ALTER TABLE voice_notes ADD COLUMN client_id TEXT`,
-  `CREATE UNIQUE INDEX IF NOT EXISTS idx_tm_client ON text_messages(from_id, client_id)`,
-  `CREATE UNIQUE INDEX IF NOT EXISTS idx_vn_client ON voice_notes(from_id, client_id)`,
-  // 📎 v3.1 : pièces jointes (nom, type, taille), forme d'onde et écoute des vocaux
-  `ALTER TABLE text_messages ADD COLUMN att_name TEXT`,
-  `ALTER TABLE text_messages ADD COLUMN att_mime TEXT`,
-  `ALTER TABLE text_messages ADD COLUMN att_size INTEGER`,
-  `ALTER TABLE voice_notes ADD COLUMN wave TEXT`,
-  `ALTER TABLE voice_notes ADD COLUMN played_at INTEGER`,
-  // 🗑️ v3.1 : « supprimer pour moi » — masque un message pour UN utilisateur
-  `CREATE TABLE IF NOT EXISTS msg_hidden (
-     user_id TEXT NOT NULL,
-     msg_id  TEXT NOT NULL,
-     at      INTEGER NOT NULL,
-     PRIMARY KEY (user_id, msg_id)
-   )`,
-
-  // ── v3.2 BOUTIQUE — catalogue, commandes, paiements, plans utilisateur ──
-
-  // Catalogue des forfaits (géré par l'admin)
-  `CREATE TABLE IF NOT EXISTS shop_packages (
-     id            INTEGER PRIMARY KEY AUTOINCREMENT,
-     name          TEXT NOT NULL,
-     description   TEXT NOT NULL DEFAULT '',
-     price_cents   INTEGER NOT NULL,
-     currency      TEXT NOT NULL DEFAULT 'USD',
-     minutes       INTEGER NOT NULL DEFAULT 0,
-     sms_count     INTEGER NOT NULL DEFAULT 0,
-     days          INTEGER NOT NULL DEFAULT 30,
-     prefix        TEXT NOT NULL DEFAULT '',
-     category      TEXT NOT NULL DEFAULT 'credit',
-     conditions    TEXT NOT NULL DEFAULT '',
-     renewable     INTEGER NOT NULL DEFAULT 0,
-     sort_order    INTEGER NOT NULL DEFAULT 0,
-     active        INTEGER NOT NULL DEFAULT 1,
-     created_at    INTEGER NOT NULL,
-     updated_at    INTEGER
-   )`,
-
-  // Commandes : lien utilisateur ↔ forfait avec prix figé au moment de l'achat
-  `CREATE TABLE IF NOT EXISTS shop_orders (
-     id               TEXT PRIMARY KEY,
-     user_id          TEXT NOT NULL REFERENCES users(id),
-     package_id       INTEGER NOT NULL,
-     package_name     TEXT NOT NULL,
-     package_snapshot TEXT NOT NULL DEFAULT '{}',
-     amount_cents     INTEGER NOT NULL,
-     currency         TEXT NOT NULL DEFAULT 'USD',
-     status           TEXT NOT NULL DEFAULT 'pending',
-     payment_id       TEXT,
-     created_at       INTEGER NOT NULL,
-     expires_at       INTEGER NOT NULL,
-     paid_at          INTEGER,
-     activated_at     INTEGER
-   )`,
-  `CREATE INDEX IF NOT EXISTS idx_shop_orders_user ON shop_orders(user_id)`,
-  `CREATE INDEX IF NOT EXISTS idx_shop_orders_status ON shop_orders(status)`,
-
-  // Paiements boutique (séparés des paiements de rechargement de portefeuille)
-  `CREATE TABLE IF NOT EXISTS shop_payments (
-     id            TEXT PRIMARY KEY,
-     order_id      TEXT NOT NULL REFERENCES shop_orders(id),
-     user_id       TEXT NOT NULL REFERENCES users(id),
-     provider      TEXT NOT NULL,
-     method        TEXT NOT NULL,
-     phone         TEXT,
-     amount_cents  INTEGER NOT NULL,
-     currency      TEXT NOT NULL DEFAULT 'USD',
-     reference     TEXT NOT NULL UNIQUE,
-     order_number  TEXT,
-     status        TEXT NOT NULL DEFAULT 'pending',
-     created_at    INTEGER NOT NULL,
-     updated_at    INTEGER
-   )`,
-  `CREATE UNIQUE INDEX IF NOT EXISTS idx_shop_pay_ref ON shop_payments(reference)`,
-  `CREATE INDEX IF NOT EXISTS idx_shop_pay_order ON shop_payments(order_id)`,
-
-  // Plans activés (droits accordés à l'utilisateur)
-  `CREATE TABLE IF NOT EXISTS user_plans (
-     id             TEXT PRIMARY KEY,
-     user_id        TEXT NOT NULL REFERENCES users(id),
-     order_id       TEXT NOT NULL REFERENCES shop_orders(id),
-     package_id     INTEGER NOT NULL,
-     package_name   TEXT NOT NULL,
-     prefix         TEXT NOT NULL DEFAULT '',
-     minutes_total  INTEGER NOT NULL DEFAULT 0,
-     remaining_sec  INTEGER NOT NULL DEFAULT 0,
-     consumed_sec   INTEGER NOT NULL DEFAULT 0,
-     sms_total      INTEGER NOT NULL DEFAULT 0,
-     remaining_sms  INTEGER NOT NULL DEFAULT 0,
-     consumed_sms   INTEGER NOT NULL DEFAULT 0,
-     unlimited      INTEGER NOT NULL DEFAULT 0,
-     activated_at   INTEGER NOT NULL,
-     expires_at     INTEGER NOT NULL,
-     status         TEXT NOT NULL DEFAULT 'active'
-   )`,
-  `CREATE INDEX IF NOT EXISTS idx_user_plans_user ON user_plans(user_id, status)`,
-  `CREATE INDEX IF NOT EXISTS idx_user_plans_expires ON user_plans(expires_at)`,
-
-  // ── v3.2 APPELS — colonnes de facturation manquantes ──
-  `ALTER TABLE calls ADD COLUMN billed_sec INTEGER DEFAULT 0`,
-  `ALTER TABLE calls ADD COLUMN cost_cents INTEGER DEFAULT 0`,
-  `ALTER TABLE calls ADD COLUMN provider_cost_cents INTEGER`,
-  `ALTER TABLE calls ADD COLUMN provider_currency TEXT`,
-  `ALTER TABLE calls ADD COLUMN ended_at INTEGER`,
-  `ALTER TABLE calls ADD COLUMN user_plan_id TEXT`,
-
-  // ── v3.2 TRANSACTIONS — statut pour réservations ──
-  `ALTER TABLE transactions ADD COLUMN status TEXT DEFAULT 'confirmed'`,
-
-  // ── v3.3 BOUTIQUE — cadeaux de forfaits ──
-  `ALTER TABLE shop_orders ADD COLUMN recipient_phone TEXT`,
-  `ALTER TABLE shop_orders ADD COLUMN recipient_name TEXT`,
-  `ALTER TABLE user_plans ADD COLUMN recipient_phone TEXT`,
-  `ALTER TABLE user_plans ADD COLUMN is_gift INTEGER DEFAULT 0`,
+  `ALTER TABLE users ADD COLUMN presence_visible INTEGER NOT NULL DEFAULT 1`,
+  `ALTER TABLE users ADD COLUMN notifications_enabled INTEGER NOT NULL DEFAULT 1`,
+  `ALTER TABLE users ADD COLUMN last_seen_at INTEGER`,
+  `ALTER TABLE calls ADD COLUMN callee_user_id TEXT`,
+  `ALTER TABLE calls ADD COLUMN rtc_mode INTEGER NOT NULL DEFAULT 0`,
+  `ALTER TABLE calls ADD COLUMN with_video INTEGER NOT NULL DEFAULT 0`,
+  `ALTER TABLE calls ADD COLUMN offer_sdp TEXT`,
+  `ALTER TABLE calls ADD COLUMN push_notified_at INTEGER`,
+  `ALTER TABLE calls ADD COLUMN direction TEXT NOT NULL DEFAULT 'outgoing'`,
+  `ALTER TABLE stories ADD COLUMN visibilite TEXT NOT NULL DEFAULT 'contacts'`,
+  `ALTER TABLE posts ADD COLUMN event_lieu TEXT`,
+  `ALTER TABLE messages ADD COLUMN duration_sec INTEGER`,
+  `ALTER TABLE messages ADD COLUMN wave TEXT`,
 ];
 
 let db;
@@ -366,12 +357,14 @@ module.exports = {
   },
 
   async init() {
-    db = new Database(path.join(__dirname, '..', '..', 'mbote.db'));
+    db = new Database(process.env.MBOTE_SQLITE_PATH || path.join(__dirname, '..', '..', 'mbote.db'));
     db.pragma('journal_mode = WAL');
     db.pragma('foreign_keys = ON');
     db.exec(SCHEMA);
     for (const m of MIGRATIONS) { try { db.exec(m); } catch { /* colonne déjà présente */ } }
   },
+
+  close: () => lock(async () => { if (db && db.open) db.close(); }),
 
   get: (sql, p) => lock(() => raw.get(sql, p)),
   all: (sql, p) => lock(() => raw.all(sql, p)),
@@ -390,41 +383,3 @@ module.exports = {
       }
     }),
 };
-// (patch below replaces the closing 
-  // ── v3.4 PRÉSENCE — horodatage de dernière vue ──
-  `ALTER TABLE users ADD COLUMN last_seen_at INTEGER`,
-
-  // ── v3.4 PRÉSENCE — abonnements «Rappelle-moi» ──
-  `CREATE TABLE IF NOT EXISTS watches (
-     id          TEXT PRIMARY KEY,
-     watcher_id  TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-     target_phone TEXT NOT NULL,
-     created_at  INTEGER NOT NULL
-  )`,
-  `CREATE INDEX IF NOT EXISTS idx_watches_target ON watches(target_phone)`,
-
-  // ── v3.4 APPEL PROGRAMMÉ ──
-  `CREATE TABLE IF NOT EXISTS dial_later (
-     id           TEXT PRIMARY KEY,
-     user_id      TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-     target_phone TEXT NOT NULL,
-     target_name  TEXT NOT NULL DEFAULT '',
-     scheduled_at INTEGER NOT NULL,
-     tz_offset    INTEGER NOT NULL DEFAULT 0,
-     reminded     INTEGER NOT NULL DEFAULT 0,
-     cancelled    INTEGER NOT NULL DEFAULT 0,
-     created_at   INTEGER NOT NULL
-  )`,
-  `CREATE INDEX IF NOT EXISTS idx_dial_later_user ON dial_later(user_id, cancelled)`,
-
-  // ── v3.4 LIENS D'INVITATION ──
-  `CREATE TABLE IF NOT EXISTS invite_tokens (
-     token        TEXT PRIMARY KEY,
-     user_id      TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-     referral_code TEXT NOT NULL,
-     created_at   INTEGER NOT NULL,
-     expires_at   INTEGER NOT NULL,
-     used_at      INTEGER
-  )`,
-];
- above — do not concat twice)

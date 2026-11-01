@@ -26,7 +26,7 @@
 const crypto  = require('crypto');
 const express = require('express');
 const db      = require('../db');
-const { uid, now, ah } = require('../util');
+const { uid, now, normalizePhone, ah } = require('../util');
 const { requireAuth, requireAdmin } = require('../middleware/auth');
 const { rateLimit } = require('../middleware/ratelimit');
 const shop    = require('../services/shop');
@@ -46,10 +46,7 @@ const router  = express.Router();
  */
 function verifyFlexPayWebhook(req) {
   const secret = process.env.FLEXPAY_WEBHOOK_SECRET;
-  if (!secret) {
-    console.warn('⚠️  FLEXPAY_WEBHOOK_SECRET non défini — webhook accepté sans vérification');
-    return true;
-  }
+  if (!secret) return false;
 
   // Mode Bearer
   const authHeader = req.headers['authorization'] || '';
@@ -103,17 +100,20 @@ router.get('/catalog', requireAuth, ah(async (req, res) => {
 // ── Commandes ─────────────────────────────────────────────────────────────────
 
 router.post('/orders', requireAuth, orderRateLimit, ah(async (req, res) => {
-  const { package_id } = req.body;
-  if (!package_id) return res.status(400).json({ error: 'package_id requis' });
+  const packageId = Number(req.body.package_id);
+  if (!Number.isSafeInteger(packageId) || packageId < 1)
+    return res.status(400).json({ error: 'package_id invalide' });
 
-  const order = await shop.createOrder(req.user.id, package_id);
+  const order = await shop.createOrder(req.user.id, packageId);
   res.status(201).json({ order });
 }));
 
 // ── Commande cadeau pour un tiers ──────────────────────────────────────────────
 router.post('/gift-orders', requireAuth, orderRateLimit, ah(async (req, res) => {
-  const { package_id, recipient_phone, recipient_name } = req.body;
-  if (!package_id)       return res.status(400).json({ error: 'package_id requis' });
+  const { recipient_phone, recipient_name } = req.body;
+  const packageId = Number(req.body.package_id);
+  if (!Number.isSafeInteger(packageId) || packageId < 1)
+    return res.status(400).json({ error: 'package_id invalide' });
   if (!recipient_phone)  return res.status(400).json({ error: 'recipient_phone requis' });
 
   // Normaliser le numéro +243XXXXXXXXX
@@ -121,8 +121,10 @@ router.post('/gift-orders', requireAuth, orderRateLimit, ah(async (req, res) => 
   if (!/^\+243\d{9}$/.test(phone)) {
     return res.status(400).json({ error: 'Numéro recipient invalide (format +243XXXXXXXXX)' });
   }
+  if (recipient_name != null && (typeof recipient_name !== 'string' || recipient_name.trim().length > 60))
+    return res.status(400).json({ error: 'Nom du bénéficiaire trop long' });
 
-  const order = await shop.createGiftOrder(req.user.id, package_id, phone, recipient_name || null);
+  const order = await shop.createGiftOrder(req.user.id, packageId, phone, recipient_name || null);
   res.status(201).json({ order });
 }));
 
@@ -143,15 +145,20 @@ router.get('/orders/:id/status', requireAuth, ah(async (req, res) => {
 // ── Paiement ──────────────────────────────────────────────────────────────────
 
 router.post('/orders/:id/pay', requireAuth, ah(async (req, res) => {
-  const { method, phone } = req.body;
+  const { method } = req.body;
+  let phone = null;
   if (!method) return res.status(400).json({ error: 'method requis' });
   if (!ALLOWED_METHODS.includes(method)) {
     return res.status(400).json({
       error: `Moyen de paiement invalide. Valeurs acceptées : ${ALLOWED_METHODS.join(', ')}`,
     });
   }
-  if (method !== 'card' && !phone) {
+  if (method !== 'card' && !req.body.phone) {
     return res.status(400).json({ error: 'phone requis pour Mobile Money' });
+  }
+  if (method !== 'card') {
+    phone = normalizePhone(req.body.phone);
+    if (!phone) return res.status(400).json({ error: 'Numéro Mobile Money invalide' });
   }
 
   // Vérifier que la commande appartient à cet utilisateur
@@ -197,18 +204,16 @@ router.get('/my-plans/all', requireAuth, ah(async (req, res) => {
 // ── Webhook FlexPay (public — ne nécessite PAS d'authentification JWT) ───────
 
 router.post('/webhook', ah(async (req, res) => {
-  // Répondre 200 immédiatement (Twilio / FlexPay exigent une réponse rapide)
-  // Le traitement se fait de manière asynchrone en cas de délai
-  res.sendStatus(200);
-
   // Vérification de la signature
   if (!verifyFlexPayWebhook(req)) {
     console.warn('⚠️  Webhook boutique rejeté : signature invalide');
-    return;
+    return res.sendStatus(401);
   }
 
+  // FlexPay attend une réponse rapide; le traitement reste fail-closed sur
+  // la vérification du paiement par le fournisseur avant toute activation.
+  res.sendStatus(200);
   const body = req.body || {};
-  console.log('📦 Webhook boutique reçu :', JSON.stringify(body));
 
   // Identifier le paiement par sa référence marchande
   const reference = body.reference || body.orderNumber || body.order_number;
@@ -233,10 +238,6 @@ router.post('/webhook', ah(async (req, res) => {
   }
 
   // Toujours vérifier via l'API fournisseur, ne jamais croire le webhook seul
-  const confirmedAmount = body.amount
-    ? Math.round(parseFloat(body.amount) * 100)
-    : null;
-
   await shop.pollAndActivate(pay).catch((e) =>
     console.error('💥 Erreur activation webhook boutique :', e.message)
   );
