@@ -114,6 +114,7 @@ app.use('/api/rtc',      require('./modules/rtc.routes'));
 app.use('/api/payments', require('./modules/payments.routes'));
 app.use('/api/shop',     require('./modules/shop.routes'));
 app.use('/api/admin',    require('./modules/admin.routes'));
+app.use('/api/feed',     require('./modules/feed.routes'));  // v3.2
 
 /* ---- Console admin (web) ---- */
 app.use('/admin', express.static(path.join(__dirname, '..', 'public', 'admin')));

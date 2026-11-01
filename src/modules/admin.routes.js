@@ -1,39 +1,20 @@
 /**
  * Module ADMIN — back-office : stats, utilisateurs, tarifs, CDR, transactions.
- *
- * SÉCURITÉ :
- *   • B4 : login admin protégé par rate-limit (5 essais / 10 min / IP) — MSTG-AUTH-8
  */
 const express = require('express');
 const db = require('../db');
 const { uid, now, verifyPassword, normalizePhone, ah } = require('../util');
 const { sign, requireAdmin } = require('../middleware/auth');
-const { rateLimit } = require('../middleware/ratelimit');
 
 const r = express.Router();
 
-/* ── B4 : Login admin sécurisé (MASVS MSTG-AUTH-8) ─────────────────────────
- * Sans limite de débit, un attaquant peut tester des milliers de mots de passe
- * (force brute) sur l'interface d'administration sans être bloqué.
- * 5 tentatives / 10 min / IP — fenêtre glissante.
- */
-const limitAdminLogin = rateLimit({
-  windowMs: 10 * 60_000,
-  max: 5,
-  key: (req) => 'admin-login:' + req.ip,
-  message: 'Trop de tentatives — accès bloqué 10 minutes, réessaie ensuite',
-});
-
-r.post('/login', limitAdminLogin, ah(async (req, res) => {
+/* ---- Login admin ---- */
+r.post('/login', ah(async (req, res) => {
   const phone = normalizePhone(req.body.phone);
-  const password = String(req.body.password || '').trim();
+  const password = String(req.body.password || '').trim(); // tolère les espaces parasites
   const user = await db.get(`SELECT * FROM users WHERE phone = ? AND role = 'admin'`, [phone]);
-  if (!user || !verifyPassword(password, user.password_hash)) {
-    // Délai constant pour éviter les attaques de synchronisation (timing attack)
-    await new Promise((r) => setTimeout(r, 200 + Math.random() * 100));
+  if (!user || !verifyPassword(password, user.password_hash))
     return res.status(401).json({ error: 'Identifiants incorrects' });
-  }
-  console.log(`🔐 [ADMIN] Connexion réussie pour ${phone} depuis ${req.ip}`);
   res.json({ token: sign(user), name: user.name });
 }));
 

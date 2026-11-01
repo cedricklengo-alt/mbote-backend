@@ -153,6 +153,57 @@ CREATE TABLE IF NOT EXISTS invites (
   phone      TEXT NOT NULL,
   created_at INTEGER NOT NULL
 );
+
+-- ── v3.2 FEED ────────────────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS posts (
+  id          TEXT PRIMARY KEY,
+  user_id     TEXT NOT NULL REFERENCES users(id),
+  type        TEXT NOT NULL DEFAULT 'texte',   -- photo|clip|texte|event
+  texte       TEXT,
+  media_url   TEXT,
+  event_title TEXT,
+  event_date  INTEGER,
+  event_lieu  TEXT,
+  event_tags  TEXT DEFAULT '[]',
+  clip_sec    INTEGER,
+  ville       TEXT,
+  visibilite  TEXT DEFAULT 'contacts',
+  origine     TEXT DEFAULT 'rdc',
+  duree       TEXT DEFAULT 'permanent',
+  likes       INTEGER DEFAULT 0,
+  comments    INTEGER DEFAULT 0,
+  created_at  INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS stories (
+  id          TEXT PRIMARY KEY,
+  user_id     TEXT NOT NULL REFERENCES users(id),
+  media_url   TEXT,
+  texte       TEXT,
+  created_at  INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS stories_seen (
+  story_id    TEXT NOT NULL REFERENCES stories(id),
+  user_id     TEXT NOT NULL REFERENCES users(id),
+  seen_at     INTEGER NOT NULL,
+  PRIMARY KEY (story_id, user_id)
+);
+
+CREATE TABLE IF NOT EXISTS post_likes (
+  post_id     TEXT NOT NULL REFERENCES posts(id),
+  user_id     TEXT NOT NULL REFERENCES users(id),
+  created_at  INTEGER NOT NULL,
+  PRIMARY KEY (post_id, user_id)
+);
+
+CREATE TABLE IF NOT EXISTS post_comments (
+  id          TEXT PRIMARY KEY,
+  post_id     TEXT NOT NULL REFERENCES posts(id),
+  user_id     TEXT NOT NULL REFERENCES users(id),
+  texte       TEXT NOT NULL,
+  created_at  INTEGER NOT NULL
+);
 `;
 
 // Colonnes ajoutées après la V1 (ALTER sans IF NOT EXISTS en SQLite → try/catch)
