@@ -10,7 +10,7 @@
 const router = require('express').Router();
 const { requireAuth } = require('../middleware/auth');
 const db = require('../db');
-const push = require('../providers/push');         // sendData(token, data)
+const push = require('../services/push');         // sendData(token, data)
 const { v4: uuidv4 } = require('uuid');
 
 /* ─────────────── CRUD ─────────────── */
