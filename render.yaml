@@ -1,93 +1,13 @@
-# =====================================================================
-#  Render Blueprint — MboteCall Backend v3.2
-#  Un seul fichier pour créer en un clic :
-#    • mbote-db   : base PostgreSQL gérée (plan Render Free)
-#    • mbote-backend : serveur Node.js Express
-#
-#  Comment déployer :
-#   1. Pousse ce dépôt sur GitHub
-#   2. Render → New → Blueprint → sélectionne le dépôt → Deploy
-#   3. Renseigne les variables « sync: false » dans le Dashboard Render
-#      (Environment de mbote-backend)
-# =====================================================================
-
-databases:
-  - name: mbote-db
-    databaseName: mbote
-    user: mbote
-    plan: free          # PostgreSQL 256 Mo — suffisant pour démarrer
-
+# Configuration de déploiement Render.com — détectée automatiquement
 services:
   - type: web
     name: mbote-backend
     runtime: node
-    plan: free          # 512 Mo RAM — 0,1 vCPU — spin-down après 15 min d'inactivité
+    plan: free
     buildCommand: npm install
     startCommand: npm start
-
     envVars:
-      # ── Base de données : injectée automatiquement depuis mbote-db ──────────
-      - key: DATABASE_URL
-        fromDatabase:
-          name: mbote-db
-          property: connectionString
-
-      # ── Secrets générés automatiquement par Render ──────────────────────────
       - key: JWT_SECRET
-        generateValue: true           # 64 octets aléatoires à chaque création
-
-      # ── Valeurs par défaut ──────────────────────────────────────────────────
-      - key: NODE_ENV
-        value: production
+        generateValue: true          # secret généré automatiquement par Render
       - key: DEMO_MODE
-        value: "true"                 # Passez à "false" une fois Twilio configuré
-
-      # ── À RENSEIGNER dans le Dashboard Render → Environment ─────────────────
-      # (toutes à sync: false = jamais visibles en clair dans render.yaml)
-
-      # 🔔 Firebase — INDISPENSABLE pour les notifications push (appels entrants)
-      #    Firebase Console → Paramètres du projet → Comptes de service →
-      #    « Générer une nouvelle clé privée » → coller TOUT le JSON en 1 ligne
-      - key: FIREBASE_SERVICE_ACCOUNT
-        sync: false
-
-      # 📱 Twilio — pour les appels app → GSM réels (optionnel)
-      - key: TWILIO_ACCOUNT_SID
-        sync: false
-      - key: TWILIO_API_KEY
-        sync: false
-      - key: TWILIO_API_SECRET
-        sync: false
-      - key: TWILIO_TWIML_APP_SID
-        sync: false
-      - key: TWILIO_CALLER_ID
-        sync: false
-
-      # 🌐 URL publique — pour les webhooks de paiement FlexPay
-      #    Format : https://mbote-backend.onrender.com
-      - key: PUBLIC_URL
-        sync: false
-
-      # 💳 FlexPay — Mobile Money RDC (optionnel)
-      - key: FLEXPAY_MERCHANT
-        sync: false
-      - key: FLEXPAY_TOKEN
-        sync: false
-      - key: FLEXPAY_WEBHOOK_SECRET
-        sync: false
-
-      # 📡 Relais TURN — appels sur réseau 4G/entreprise (optionnel, metered.ca)
-      - key: METERED_SUBDOMAIN
-        sync: false
-      - key: METERED_API_KEY
-        sync: false
-
-      # 🔐 Console admin — mot de passe (défaut : MboteAdmin2026)
-      - key: ADMIN_PASSWORD
-        sync: false
-
-      # 💸 Reloadly — recharges airtime GSM (optionnel)
-      - key: RELOADLY_CLIENT_ID
-        sync: false
-      - key: RELOADLY_CLIENT_SECRET
-        sync: false
+        value: "true"

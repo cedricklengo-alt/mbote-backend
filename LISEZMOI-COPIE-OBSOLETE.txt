@@ -1,0 +1,22 @@
+⚠️  CETTE COPIE DU BACKEND EST OBSOLÈTE — NE PAS L'UTILISER
+============================================================
+
+Le backend de référence est :   backend/GitHub/mbote-backend/
+    · dépôt git relié à github.com/cedricklengo-alt/mbote-backend
+    · 20 modules de routes (celui-ci n'en a que 11)
+    · c'est lui qui est déployé sur Render, où l'application pointe
+      (voir mbote_app/lib/config.dart → mbote-backend-1.onrender.com)
+
+Ce dossier-ci n'est pas un dépôt git et lui manque entre autres :
+messages, lokota, shop, packages, airtime, i18n, presence, dial_later,
+invite, le service push Firebase et le TURN Metered.
+
+Son protocole d'appel de groupe diffère également (members/phone/name
+au lieu de peers/from/from_name), ce qui peut induire en erreur.
+
+Le 2026-11-01, des correctifs ont été appliqués ICI par erreur avant
+que la confusion soit détectée : src/modules/rtc.ws.js modifié et
+test/group_signaling.test.js ajouté. Ils ne servent à rien et ne
+correspondent pas au protocole déployé — ignorez-les.
+
+Recommandation : supprimer ce dossier pour éviter toute ambiguïté.
