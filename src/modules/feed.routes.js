@@ -1,218 +1,240 @@
 'use strict';
-// modules/feed.routes.js — API Feed Mbote v3.2
-// Routes :
-//   GET  /api/feed              → flux paginé (cursor)
-//   GET  /api/feed/stories      → statuts actifs < 24h
-//   POST /api/feed/posts        → créer un post
-//   POST /api/feed/stories      → publier un statut
-//   POST /api/feed/stories/:id/seen
-//   POST /api/feed/posts/:id/like
-//   GET  /api/feed/posts/:id/comments
-//   POST /api/feed/posts/:id/comments
 
-const express        = require('express');
-const db             = require('../db');
-const { requireAuth} = require('../middleware/auth');
+const express  = require('express');
+const db       = require('../db');
+const { requireAuth } = require('../middleware/auth');
 const { uid, now, ah } = require('../util');
 
 const r = express.Router();
 
-// ── Flux principal (cursor-based) ─────────────────────────────────────────
+// ─── GET /api/feed ────────────────────────────────────────────────────────────
+// Fil principal : posts publics + communauté + propres posts.
+// Visibilité « contacts » : visible si le poster est dans les contacts de l'utilisateur.
+// Pagination curseur : ?before=<ts>&cursor=<id>
 r.get('/', requireAuth, ah(async (req, res) => {
-  const userId  = req.user.id;
-  const limit   = Math.min(parseInt(req.query.limit) || 20, 50);
-  const before  = parseInt(req.query.before) || now();
-  const cursor  = req.query.cursor || null;
+  const userId = req.user.uid;
+  const limit  = 20;
+  const before = req.query.before  ? Number(req.query.before) : now() + 1;
+  const cursor = req.query.cursor  || '\xff'; // valeur maximale par défaut
 
-  // Posts de contacts + communauté + public, triés du plus récent
-  const rows = await db.all(
-    `SELECT p.*, u.name AS author_name, u.phone AS author_phone, u.avatar AS author_avatar,
-            (SELECT 1 FROM post_likes pl WHERE pl.post_id = p.id AND pl.user_id = ?) AS liked,
-            (SELECT 1 FROM contacts c WHERE c.user_id = ? AND c.contact_phone = u.phone) AS is_contact
-     FROM posts p
-     JOIN users u ON u.id = p.user_id
-     WHERE p.created_at < ?
-       AND (cursor IS NULL OR (p.created_at, p.id) < (?, ?))
-       AND (
-         p.visibilite = 'public'
-         OR p.user_id = ?
-         OR (p.visibilite = 'contacts'
-             AND EXISTS (SELECT 1 FROM contacts c WHERE c.user_id = ? AND c.contact_phone = u.phone))
-         OR p.visibilite = 'communaute'
-       )
-     ORDER BY p.created_at DESC, p.id DESC
-     LIMIT ?`,
-    [userId, userId, before, before, cursor || '', userId, userId, limit]
-  );
+  const posts = await db.all(`
+    SELECT p.*,
+           u.name    AS author_name,
+           u.country AS author_country,
+           CASE WHEN pl.user_id IS NOT NULL THEN 1 ELSE 0 END AS liked
+    FROM posts p
+    JOIN users u ON u.id = p.author_id
+    LEFT JOIN post_likes pl ON pl.post_id = p.id AND pl.user_id = ?1
+    WHERE (
+        p.visibilite IN ('public', 'communauté')
+        OR p.author_id = ?1
+        OR (
+          p.visibilite = 'contacts'
+          AND p.author_id IN (
+            SELECT c.user_id FROM contacts c
+            JOIN users uc ON uc.phone = c.phone
+            WHERE uc.id = ?1
+          )
+        )
+      )
+      AND (p.created_at < ?2 OR (p.created_at = ?2 AND p.id < ?3))
+    ORDER BY p.created_at DESC, p.id DESC
+    LIMIT ?4
+  `, [userId, before, cursor, limit + 1]);
 
-  const items = rows.map(row => _fmtPost(row));
-  const next  = items.length === limit
-    ? { before: items[items.length - 1].createdAt, cursor: items[items.length - 1].id }
-    : null;
+  const hasMore = posts.length > limit;
+  const items   = hasMore ? posts.slice(0, limit) : posts;
+  const last    = items[items.length - 1];
 
-  res.json({ items, next });
+  res.json({
+    posts: items,
+    next:  hasMore && last ? { before: last.created_at, cursor: last.id } : null,
+  });
 }));
 
-// ── Statuts (stories) actifs ──────────────────────────────────────────────
+// ─── GET /api/feed/stories ────────────────────────────────────────────────────
+// Stories actives (< 24h), non vues en premier.
 r.get('/stories', requireAuth, ah(async (req, res) => {
-  const userId  = req.user.id;
-  const cutoff  = now() - 86400000; // 24h en ms
+  const userId = req.user.uid;
+  const cutoff = now() - 24 * 60 * 60 * 1000;
 
-  const rows = await db.all(
-    `SELECT s.*, u.name AS author_name, u.phone AS author_phone,
-            (SELECT 1 FROM stories_seen ss WHERE ss.story_id = s.id AND ss.user_id = ?) AS seen
-     FROM stories s
-     JOIN users u ON u.id = s.user_id
-     WHERE s.created_at > ?
-       AND (s.user_id = ?
-            OR EXISTS (SELECT 1 FROM contacts c WHERE c.user_id = ? AND c.contact_phone = u.phone))
-     ORDER BY seen ASC, s.created_at DESC`,
-    [userId, cutoff, userId, userId]
-  );
+  const stories = await db.all(`
+    SELECT s.*,
+           u.name    AS author_name,
+           u.country AS author_country,
+           CASE WHEN ss.user_id IS NOT NULL THEN 1 ELSE 0 END AS seen
+    FROM stories s
+    JOIN users u ON u.id = s.author_id
+    LEFT JOIN stories_seen ss ON ss.story_id = s.id AND ss.user_id = ?1
+    WHERE s.created_at >= ?2
+    ORDER BY seen ASC, s.created_at DESC
+  `, [userId, cutoff]);
 
-  res.json(rows.map(r => ({
-    id:          r.id,
-    authorId:    r.user_id,
-    authorName:  r.author_name,
-    authorPhone: r.author_phone,
-    authorAvatar:r.author_avatar || null,
-    mediaUrl:    r.media_url,
-    texte:       r.texte,
-    createdAt:   r.created_at,
-    isSeen:      !!r.seen,
-    isMe:        r.user_id === userId,
-  })));
+  res.json({ stories });
 }));
 
-// ── Créer un post ─────────────────────────────────────────────────────────
+// ─── POST /api/feed/posts ─────────────────────────────────────────────────────
+// Créer un post.
 r.post('/posts', requireAuth, ah(async (req, res) => {
-  const { type, texte, mediaUrl, eventTitle, eventDate, eventLieu,
-          eventTags, clipSec, ville, visibilite, origine, duree } = req.body;
+  const {
+    type,
+    origine            = 'rdc',
+    duree              = 'permanent',
+    visibilite         = 'public',
+    media_url,
+    texte,
+    event_title,
+    event_date,
+    event_tags,
+    clip_duree_seconds,
+  } = req.body;
 
-  if (!type) return res.status(400).json({ error: 'type requis' });
+  if (!['photo', 'clip', 'texte', 'event'].includes(type))
+    return res.status(400).json({ error: 'Type invalide (photo|clip|texte|event)' });
+  if (!['rdc', 'diaspora'].includes(origine))
+    return res.status(400).json({ error: 'Origine invalide (rdc|diaspora)' });
+  if (!['h24', 'permanent'].includes(duree))
+    return res.status(400).json({ error: 'Durée invalide (h24|permanent)' });
+  if (!['contacts', 'communauté', 'public'].includes(visibilite))
+    return res.status(400).json({ error: 'Visibilité invalide' });
+  if (type === 'texte'  && !texte)       return res.status(400).json({ error: 'texte requis' });
+  if (type === 'photo'  && !media_url)   return res.status(400).json({ error: 'media_url requis' });
+  if (type === 'clip'   && !media_url)   return res.status(400).json({ error: 'media_url requis' });
+  if (type === 'event'  && !event_title) return res.status(400).json({ error: 'event_title requis' });
 
-  const id = uid('pst');
-  await db.run(
-    `INSERT INTO posts
-      (id, user_id, type, texte, media_url, event_title, event_date,
-       event_lieu, event_tags, clip_sec, ville, visibilite, origine, duree, created_at)
-     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-    [id, req.user.id, type, texte || null, mediaUrl || null,
-     eventTitle || null, eventDate || null, eventLieu || null,
-     JSON.stringify(eventTags || []), clipSec || null,
-     ville || null, visibilite || 'contacts', origine || 'rdc',
-     duree || 'permanent', now()]
-  );
+  const id = uid('po');
+  const ts = now();
 
-  res.status(201).json({ id });
+  await db.run(`
+    INSERT INTO posts
+      (id, author_id, type, origine, duree, visibilite,
+       media_url, texte, event_title, event_date, event_tags,
+       clip_duree_seconds, likes_count, comments_count, created_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?)
+  `, [
+    id, req.user.uid, type, origine, duree, visibilite,
+    media_url      || null,
+    texte          || null,
+    event_title    || null,
+    event_date     || null,
+    event_tags     ? JSON.stringify(event_tags) : null,
+    clip_duree_seconds || null,
+    ts,
+  ]);
+
+  const post = await db.get(
+    `SELECT p.*, u.name AS author_name, u.country AS author_country
+     FROM posts p JOIN users u ON u.id = p.author_id WHERE p.id = ?`,
+    [id]);
+  res.status(201).json({ post });
 }));
 
-// ── Publier un statut ─────────────────────────────────────────────────────
+// ─── POST /api/feed/stories ───────────────────────────────────────────────────
+// Publier une story (expire automatiquement après 24 h).
 r.post('/stories', requireAuth, ah(async (req, res) => {
-  const { mediaUrl, texte } = req.body;
-  if (!mediaUrl && !texte) return res.status(400).json({ error: 'media_url ou texte requis' });
+  const { media_url } = req.body;
+  if (!media_url) return res.status(400).json({ error: 'media_url requis' });
 
-  const id = uid('sto');
+  const id = uid('st');
+  const ts = now();
+
   await db.run(
-    `INSERT INTO stories (id, user_id, media_url, texte, created_at) VALUES (?,?,?,?,?)`,
-    [id, req.user.id, mediaUrl || null, texte || null, now()]
+    'INSERT INTO stories (id, author_id, media_url, created_at, expires_at) VALUES (?, ?, ?, ?, ?)',
+    [id, req.user.uid, media_url, ts, ts + 24 * 60 * 60 * 1000],
   );
 
-  res.status(201).json({ id });
+  const story = await db.get('SELECT * FROM stories WHERE id = ?', [id]);
+  res.status(201).json({ story });
 }));
 
-// ── Marquer un statut vu ──────────────────────────────────────────────────
+// ─── POST /api/feed/stories/:id/seen ─────────────────────────────────────────
 r.post('/stories/:id/seen', requireAuth, ah(async (req, res) => {
-  const { id } = req.params;
+  const story = await db.get('SELECT id FROM stories WHERE id = ?', [req.params.id]);
+  if (!story) return res.status(404).json({ error: 'Story introuvable' });
+
   await db.run(
-    `INSERT OR IGNORE INTO stories_seen (story_id, user_id, seen_at) VALUES (?,?,?)`,
-    [id, req.user.id, now()]
+    'INSERT OR IGNORE INTO stories_seen (story_id, user_id, seen_at) VALUES (?, ?, ?)',
+    [req.params.id, req.user.uid, now()],
   );
   res.json({ ok: true });
 }));
 
-// ── Like / unlike ─────────────────────────────────────────────────────────
+// ─── POST /api/feed/posts/:id/like ───────────────────────────────────────────
+// Toggle like — retourne le nouvel état.
 r.post('/posts/:id/like', requireAuth, ah(async (req, res) => {
-  const { id } = req.params;
-  const userId = req.user.id;
+  const { id }   = req.params;
+  const userId   = req.user.uid;
+  const post     = await db.get('SELECT id, likes_count FROM posts WHERE id = ?', [id]);
+  if (!post) return res.status(404).json({ error: 'Post introuvable' });
 
   const existing = await db.get(
-    `SELECT 1 FROM post_likes WHERE post_id = ? AND user_id = ?`,
-    [id, userId]
+    'SELECT 1 FROM post_likes WHERE post_id = ? AND user_id = ?', [id, userId],
   );
 
   if (existing) {
-    await db.run(`DELETE FROM post_likes WHERE post_id = ? AND user_id = ?`, [id, userId]);
-    await db.run(`UPDATE posts SET likes = MAX(0, likes - 1) WHERE id = ?`, [id]);
-    return res.json({ liked: false });
+    await db.tx(async (tx) => {
+      await tx.run('DELETE FROM post_likes WHERE post_id = ? AND user_id = ?', [id, userId]);
+      await tx.run('UPDATE posts SET likes_count = MAX(0, likes_count - 1) WHERE id = ?', [id]);
+    });
+    res.json({ liked: false, likes: Math.max(0, post.likes_count - 1) });
+  } else {
+    await db.tx(async (tx) => {
+      await tx.run(
+        'INSERT OR IGNORE INTO post_likes (post_id, user_id, created_at) VALUES (?, ?, ?)',
+        [id, userId, now()],
+      );
+      await tx.run('UPDATE posts SET likes_count = likes_count + 1 WHERE id = ?', [id]);
+    });
+    res.json({ liked: true, likes: post.likes_count + 1 });
   }
-
-  await db.run(`INSERT INTO post_likes (post_id, user_id, created_at) VALUES (?,?,?)`, [id, userId, now()]);
-  await db.run(`UPDATE posts SET likes = likes + 1 WHERE id = ?`, [id]);
-  const post = await db.get(`SELECT likes FROM posts WHERE id = ?`, [id]);
-  res.json({ liked: true, likes: post?.likes ?? 0 });
 }));
 
-// ── Commentaires (lecture) ────────────────────────────────────────────────
+// ─── GET /api/feed/posts/:id/comments ────────────────────────────────────────
 r.get('/posts/:id/comments', requireAuth, ah(async (req, res) => {
-  const rows = await db.all(
-    `SELECT pc.*, u.name AS author_name FROM post_comments pc
-     JOIN users u ON u.id = pc.user_id
-     WHERE pc.post_id = ?
-     ORDER BY pc.created_at ASC`,
-    [req.params.id]
-  );
+  const post = await db.get('SELECT id FROM posts WHERE id = ?', [req.params.id]);
+  if (!post) return res.status(404).json({ error: 'Post introuvable' });
 
-  res.json(rows.map(r => ({
-    id:         r.id,
-    authorId:   r.user_id,
-    authorName: r.author_name,
-    texte:      r.texte,
-    createdAt:  r.created_at,
-  })));
+  const comments = await db.all(`
+    SELECT c.*, u.name AS author_name
+    FROM post_comments c
+    JOIN users u ON u.id = c.author_id
+    WHERE c.post_id = ?
+    ORDER BY c.created_at ASC
+  `, [req.params.id]);
+
+  res.json({ comments });
 }));
 
-// ── Commentaires (ajout) ──────────────────────────────────────────────────
+// ─── POST /api/feed/posts/:id/comments ───────────────────────────────────────
 r.post('/posts/:id/comments', requireAuth, ah(async (req, res) => {
   const { texte } = req.body;
-  if (!texte?.trim()) return res.status(400).json({ error: 'texte requis' });
+  if (!texte || !texte.trim()) return res.status(400).json({ error: 'texte requis' });
 
-  const id = uid('cmt');
-  await db.run(
-    `INSERT INTO post_comments (id, post_id, user_id, texte, created_at) VALUES (?,?,?,?,?)`,
-    [id, req.params.id, req.user.id, texte.trim(), now()]
-  );
-  await db.run(`UPDATE posts SET comments = comments + 1 WHERE id = ?`, [req.params.id]);
+  const post = await db.get('SELECT id FROM posts WHERE id = ?', [req.params.id]);
+  if (!post) return res.status(404).json({ error: 'Post introuvable' });
 
-  res.status(201).json({ id });
+  const cmId = uid('cm');
+  const ts   = now();
+
+  await db.tx(async (tx) => {
+    await tx.run(
+      'INSERT INTO post_comments (id, post_id, author_id, texte, created_at) VALUES (?, ?, ?, ?, ?)',
+      [cmId, req.params.id, req.user.uid, texte.trim(), ts],
+    );
+    await tx.run(
+      'UPDATE posts SET comments_count = comments_count + 1 WHERE id = ?',
+      [req.params.id],
+    );
+  });
+
+  const comment = await db.get(`
+    SELECT c.*, u.name AS author_name
+    FROM post_comments c
+    JOIN users u ON u.id = c.author_id
+    WHERE c.id = ?
+  `, [cmId]);
+
+  res.status(201).json({ comment });
 }));
-
-// ── Formattage interne ────────────────────────────────────────────────────
-function _fmtPost(row) {
-  return {
-    id:           row.id,
-    authorId:     row.user_id,
-    authorName:   row.author_name,
-    authorPhone:  row.author_phone,
-    authorAvatar: row.author_avatar || null,
-    type:         row.type,
-    texte:        row.texte,
-    mediaUrl:     row.media_url,
-    eventTitle:   row.event_title,
-    eventDate:    row.event_date,
-    eventLieu:    row.event_lieu,
-    eventTags:    JSON.parse(row.event_tags || '[]'),
-    clipSec:      row.clip_sec,
-    ville:        row.ville,
-    visibilite:   row.visibilite,
-    origine:      row.origine,
-    duree:        row.duree,
-    likes:        row.likes,
-    comments:     row.comments,
-    liked:        !!row.liked,
-    isContact:    !!row.is_contact,
-    createdAt:    row.created_at,
-  };
-}
 
 module.exports = r;

@@ -390,3 +390,41 @@ module.exports = {
       }
     }),
 };
+// (patch below replaces the closing 
+  // ── v3.4 PRÉSENCE — horodatage de dernière vue ──
+  `ALTER TABLE users ADD COLUMN last_seen_at INTEGER`,
+
+  // ── v3.4 PRÉSENCE — abonnements «Rappelle-moi» ──
+  `CREATE TABLE IF NOT EXISTS watches (
+     id          TEXT PRIMARY KEY,
+     watcher_id  TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+     target_phone TEXT NOT NULL,
+     created_at  INTEGER NOT NULL
+  )`,
+  `CREATE INDEX IF NOT EXISTS idx_watches_target ON watches(target_phone)`,
+
+  // ── v3.4 APPEL PROGRAMMÉ ──
+  `CREATE TABLE IF NOT EXISTS dial_later (
+     id           TEXT PRIMARY KEY,
+     user_id      TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+     target_phone TEXT NOT NULL,
+     target_name  TEXT NOT NULL DEFAULT '',
+     scheduled_at INTEGER NOT NULL,
+     tz_offset    INTEGER NOT NULL DEFAULT 0,
+     reminded     INTEGER NOT NULL DEFAULT 0,
+     cancelled    INTEGER NOT NULL DEFAULT 0,
+     created_at   INTEGER NOT NULL
+  )`,
+  `CREATE INDEX IF NOT EXISTS idx_dial_later_user ON dial_later(user_id, cancelled)`,
+
+  // ── v3.4 LIENS D'INVITATION ──
+  `CREATE TABLE IF NOT EXISTS invite_tokens (
+     token        TEXT PRIMARY KEY,
+     user_id      TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+     referral_code TEXT NOT NULL,
+     created_at   INTEGER NOT NULL,
+     expires_at   INTEGER NOT NULL,
+     used_at      INTEGER
+  )`,
+];
+ above — do not concat twice)

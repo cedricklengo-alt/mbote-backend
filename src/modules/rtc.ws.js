@@ -38,6 +38,12 @@ const online = new Map();
 /** call_id → appel suivi par le standardiste */
 const calls = new Map();
 
+/** Abonnements présence : targetPhone → Set<watcherId> (en mémoire, s'efface à la reconnexion) */
+const presenceWatches = new Map(); // targetPhone → Set<userId>
+
+/** Appels de groupe en cours : callId → { members: Map<phone,{ws,user}> } */
+const groupCalls = new Map();
+
 const RING_TTL = Number(process.env.RTC_RING_TTL_MS) || 55_000; // un appel sonne 55 s au maximum (réglable pour les tests)
 const GHOST_MS = 4_500;         // pas de « ringing » sous 4,5 s → socket fantôme
 const WAKE_ACK_MS = 5_000;      // pas d'acquittement du push sous 5 s → renfort visible
@@ -337,6 +343,62 @@ async function onMessage(ws, user, raw) {
     if (to) sendTo(to, { type: 'typing', from: user.phone });
     return;
   }
+  // ── Présence : "Rappelle-moi quand X se connecte" ──
+  if (type === 'watch') {
+    const target = normalizePhone(msg.target);
+    if (!target) return;
+    let set = presenceWatches.get(target);
+    if (!set) { set = new Set(); presenceWatches.set(target, set); }
+    set.add(user.id);
+    log(`👁️  watch : ${user.phone} surveille ${target}`);
+    return;
+  }
+  if (type === 'unwatch') {
+    const target = normalizePhone(msg.target);
+    if (target) { presenceWatches.get(target)?.delete(user.id); }
+    return;
+  }
+
+  // ── Appels de groupe (Mesh P2P) ──
+  if (type === 'group_join') {
+    const gId = String(msg.call_id || '');
+    if (!gId) return;
+    let g = groupCalls.get(gId);
+    if (!g) { g = { members: new Map() }; groupCalls.set(gId, g); }
+    // Prévenir les membres existants qu'un pair vient d'arriver
+    for (const [ph, m] of g.members) {
+      send(m.ws, { type: 'group_peer_joined', call_id: gId, from: user.phone, from_name: user.name });
+    }
+    g.members.set(user.phone, { ws, user });
+    // Renvoyer la liste des membres actuels à l'arrivant
+    const peers = [...g.members.keys()].filter(p => p !== user.phone);
+    send(ws, { type: 'group_joined', call_id: gId, peers });
+    log(`👥 group_join : ${user.phone} → ${gId} (${g.members.size} membres)`);
+    return;
+  }
+  if (type === 'group_leave') {
+    const gId = String(msg.call_id || '');
+    const g = groupCalls.get(gId);
+    if (g) {
+      g.members.delete(user.phone);
+      for (const [, m] of g.members) {
+        send(m.ws, { type: 'group_peer_left', call_id: gId, from: user.phone });
+      }
+      if (g.members.size === 0) groupCalls.delete(gId);
+    }
+    return;
+  }
+  if (['group_offer', 'group_answer', 'group_ice', 'group_invite'].includes(type)) {
+    const gId = String(msg.call_id || '');
+    const to  = normalizePhone(msg.to);
+    const g   = groupCalls.get(gId);
+    if (to) {
+      const toEntry = online.get(to);
+      if (toEntry) send(toEntry.ws, { ...msg, from: user.phone });
+    }
+    return;
+  }
+
   if (!['offer', 'answer', 'ice', 'reject', 'hangup', 'ringing', 'reoffer', 'reanswer'].includes(type)) return;
 
   const callId = String(msg.call_id || '');
@@ -466,6 +528,34 @@ function init(server) {
       }
     }
 
+    // 📡 Présence : notifier les watchers que ce contact est de retour
+    {
+      const set = presenceWatches.get(user.phone);
+      if (set && set.size > 0) {
+        const watchers = [...set];
+        set.clear();  // une seule notification par session off→on
+        presenceWatches.delete(user.phone);
+        for (const watcherId of watchers) {
+          // Notifier en temps réel si le watcher est connecté
+          for (const [ph, e] of online) {
+            if (e.user.id === watcherId) {
+              send(e.ws, { type: 'contact_online', phone: user.phone, name: user.name });
+            }
+          }
+          // Notifier par push si le watcher est hors ligne
+          db.get('SELECT fcm_token FROM users WHERE id = ?', [watcherId]).then(w => {
+            if (w && w.fcm_token) {
+              push.sendData(w.fcm_token, {
+                kind: 'contact_online',
+                from_phone: user.phone,
+                from_name: user.name || '',
+              }).catch(() => {});
+            }
+          }).catch(() => {});
+        }
+      }
+    }
+
     ws.on('message', (raw) => {
       onMessage(ws, user, raw).catch((e) => warn('⚠️ WS message :', e.message));
     });
@@ -475,6 +565,18 @@ function init(server) {
       if (cur && cur.ws === ws) {
         online.delete(ws._phone);
         log(`🔌 WS déconnecté : ${ws._phone} (${online.size} en ligne)`);
+        // 📅 Horodater la dernière vue
+        db.run('UPDATE users SET last_seen_at = ? WHERE phone = ?', [Date.now(), ws._phone]).catch(() => {});
+        // 🗑️ Retirer ce téléphone des appels de groupe actifs
+        for (const [gId, g] of groupCalls) {
+          if (g.members.has(ws._phone)) {
+            g.members.delete(ws._phone);
+            for (const [, m] of g.members) {
+              send(m.ws, { type: 'group_peer_left', call_id: gId, from: ws._phone });
+            }
+            if (g.members.size === 0) groupCalls.delete(gId);
+          }
+        }
         // 🏃 L'appelant a disparu en pleine sonnerie ? Délai de grâce (micro-coupure)
         const phone = ws._phone;
         const timer = setTimeout(() => {
@@ -518,4 +620,20 @@ function _debug() {
   };
 }
 
-module.exports = { init, isOnline, ackCall, declineCall, notifyMessage, _debug };
+/** Statut de présence d'un téléphone : {online: bool, lastSeenAt: number|null} */
+async function getPresence(phones) {
+  const result = {};
+  for (const phone of phones) {
+    const norm = normalizePhone(phone);
+    if (!norm) continue;
+    if (online.has(norm)) {
+      result[norm] = { online: true, lastSeenAt: null };
+    } else {
+      const u = await db.get('SELECT last_seen_at FROM users WHERE phone = ?', [norm]);
+      result[norm] = { online: false, lastSeenAt: u ? u.last_seen_at : null };
+    }
+  }
+  return result;
+}
+
+module.exports = { init, isOnline, ackCall, declineCall, notifyMessage, getPresence, presenceWatches, _debug };
