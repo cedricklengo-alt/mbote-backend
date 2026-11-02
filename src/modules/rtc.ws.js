@@ -1,645 +1,715 @@
 /**
- * rtc.ws.js — Serveur de signalement WebRTC (appels 1-1 et groupes)
+ * 🎙️ RTC — signalisation temps réel des appels voix MboteCall → MboteCall.
+ * v3.0 — « standardiste » complet.
  *
- * Protocole :
- *   Client → serveur : ping | presence | offer | answer | ice | reoffer |
- *                       reanswer | ack | decline | hangup |
- *                       group_join | group_leave | group_invite |
- *                       group_offer | group_answer | group_ice | group_mute
- *   Serveur → client  : pong | ringing | offer | answer | ice | reoffer |
- *                       reanswer | push_sent | peer_offline | reject | hangup |
- *                       group_joined | group_peer_joined | group_peer_left |
- *                       group_invite | group_offer | group_answer | group_ice |
- *                       group_mute | group_error
+ * La voix ne passe PAS par ce serveur (WebRTC direct de téléphone à
+ * téléphone). Le serveur fait passer les messages techniques ET garantit que
+ * le téléphone appelé SONNE, quel que soit son état :
  *
- * Salles : une salle est créée par son hôte (premier group_join). Seuls l'hôte
- * et les téléphones invités (group_invite) peuvent la rejoindre — connaître un
- * call_id ne suffit pas. Limite : MAX_GROUP_MEMBERS, invitations en attente
- * comprises.
+ *   app ouverte        → l'offre arrive par WebSocket ;
+ *   app en arrière-plan→ offre par WebSocket + réveil par push (data-only) ;
+ *   app fermée         → réveil par push, l'offre attend en « salle
+ *                        d'attente » et est livrée dès que l'app se connecte ;
+ *   socket fantôme     → (Android tue l'app sans fermer la connexion) pas de
+ *                        « ringing » sous 4,5 s → on bascule sur le push ;
+ *   push sans effet    → pas d'acquittement sous 5 s → notification visible.
+ *
+ * Messages client → serveur :
+ *   offer · answer · ice · ringing · reject · hangup · reoffer · reanswer
+ *   presence {state:'fg'|'bg'}   l'app est-elle au premier plan ?
+ *   ping                         → réponse « pong » (test de vie)
+ *   typing {to}                  « écrit… » (messagerie)
+ *
+ * Messages serveur → client (en plus du relais) :
+ *   push-sent · peer-offline · pong · typing · msg
+ *
+ * Connexion : wss://<serveur>/ws?token=<JWT>
  */
 
 const WebSocket = require('ws');
-const jwt = require('jsonwebtoken');
 const db = require('../db');
-const { normalizePhone, now } = require('../util');
+const { normalizePhone } = require('../util');
+const { verifyToken } = require('../middleware/auth');
 const push = require('../services/push');
 
-const SECRET = process.env.JWT_SECRET || 'dev-secret';
-const MAX_GROUP_MEMBERS = 4; // limite : créateur compris
-
-// ── État en mémoire ──────────────────────────────────────────────────────────
-
-/** phone → WebSocket (connexion active) */
+/** téléphone → { ws, user, fg, fgAt } */
 const online = new Map();
 
-/**
- * callId → {
- *   members : Map<userId, { ws, user: {id,phone,name} }>,
- *   createdAt: number
- * }
- */
+/** call_id → appel suivi par le standardiste */
+const calls = new Map();
+
+/** Abonnements présence : targetPhone → Set<watcherId> (en mémoire, s'efface à la reconnexion) */
+const presenceWatches = new Map(); // targetPhone → Set<userId>
+
+/** Appels de groupe en cours : callId → { members: Map<phone,{ws,user}> } */
 const groupCalls = new Map();
-const callTimers = new Map();
 
-// ── Authentification ──────────────────────────────────────────────────────────
+const RING_TTL = Number(process.env.RTC_RING_TTL_MS) || 55_000; // un appel sonne 55 s au maximum (réglable pour les tests)
+const GHOST_MS = 4_500;         // pas de « ringing » sous 4,5 s → socket fantôme
+const WAKE_ACK_MS = 5_000;      // pas d'acquittement du push sous 5 s → renfort visible
+const CALLER_GONE_MS = 8_000;   // l'appelant a disparu → on arrête de sonner
+const ENDED_KEEP_MS = 60_000;   // mémoire d'un appel terminé (ignore les signaux tardifs)
+const ANSWERED_MAX_MS = 5 * 3600_000;
+const MAX_CALL_ICE = 80;
+const MAX_GROUP_MEMBERS = 4;    // appel de groupe « Mbote Famille », hôte compris
 
-async function authenticate(req) {
-  const raw = req.url || '';
-  // Extrait le token du query string manuellement (pas besoin d'URL complète)
-  const m = raw.match(/[?&]token=([^&]+)/);
-  let token = null;
-  try { token = m ? decodeURIComponent(m[1]) : null; } catch { return null; }
-  if (!token) return null;
-  let payload;
+const log = (...a) => console.log(...a);
+const warn = (...a) => console.error(...a);
+
+/* ───────────── Utilitaires ───────────── */
+
+function send(ws, obj) {
   try {
-    payload = jwt.verify(token, SECRET);
-  } catch {
-    return null;
-  }
-  const user = await db.get(
-    'SELECT id, phone, name, avatar, status, presence_visible FROM users WHERE id = ?',
-    [payload.uid]
-  );
-  if (!user || user.status !== 'active') return null;
-  return user;
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify(obj));
+      return true;
+    }
+  } catch (_) { /* socket mourante */ }
+  return false;
 }
 
-// ── Helpers d'envoi ──────────────────────────────────────────────────────────
-
-function wsSend(ws, msg) {
-  if (ws && ws.readyState === WebSocket.OPEN) {
-    try { ws.send(JSON.stringify(msg)); } catch { /* connexion morte */ }
-  }
+function sendTo(phone, obj) {
+  const e = online.get(phone);
+  return e ? send(e.ws, obj) : false;
 }
 
-function isForeground(phone) {
-  const ws = online.get(phone);
-  return !!(ws && ws.readyState === WebSocket.OPEN && ws._fg !== false);
+async function getUser(phone) {
+  return db.get(
+    `SELECT id, name, fcm_token FROM users WHERE phone = ? AND status = 'active'`,
+    [phone]);
 }
 
+/** L'utilisateur est-il connecté au canal temps réel ? */
 function isOnline(phone) {
-  const ws = online.get(phone);
-  return !!(ws && ws.readyState === WebSocket.OPEN);
+  const p = normalizePhone(phone);
+  return !!(p && online.has(p));
 }
 
-function sendTo(phone, msg) {
-  const ws = online.get(phone);
-  if (!ws) return false;
-  wsSend(ws, msg);
-  return ws.readyState === WebSocket.OPEN;
+/* 🛡️ Anti-abus : chaque offre déclenche un push chez l'appelé */
+const offerBuckets = new Map(); // téléphone → { n, reset }
+function allowOffer(phone) {
+  const t = Date.now();
+  let b = offerBuckets.get(phone);
+  if (!b || t > b.reset) { b = { n: 0, reset: t + 60_000 }; offerBuckets.set(phone, b); }
+  return ++b.n <= 12; // 12 appels / minute / numéro
 }
 
-function roomBroadcast(room, msg, excludeUserId = null) {
-  const str = JSON.stringify(msg);
-  for (const [uid, { ws }] of room.members) {
-    if (uid !== excludeUserId && ws.readyState === WebSocket.OPEN) {
-      try { ws.send(str); } catch { /* connexion morte */ }
-    }
-  }
+/* ───────────── Cycle de vie d'un appel ───────────── */
+
+function clearTimers(call) {
+  clearTimeout(call.ghostTimer);
+  clearTimeout(call.wakeTimer);
+  clearTimeout(call.ttlTimer);
+  call.ghostTimer = call.wakeTimer = call.ttlTimer = null;
 }
 
-/** Liste publique des membres d'une salle, en excluant éventuellement l'un d'eux */
-function membersOf(room, excludeUserId) {
-  return [...room.members.values()]
-    .filter(m => m.user.id !== excludeUserId)
-    .map(m => ({ phone: m.user.phone, name: m.user.name }));
+/** Appel terminé (quelle qu'en soit la raison) : on garde une trace brève */
+function finish(call) {
+  if (call.state === 'ended') return;
+  call.state = 'ended';
+  call.endedAt = Date.now();
+  call.ice = [];
+  call.offerMsg = null; // libère le SDP / la photo
+  clearTimers(call);
 }
 
-function callTimeout(callId) {
-  const old = callTimers.get(callId);
-  if (old) clearTimeout(old);
-  const timer = setTimeout(async () => {
-    callTimers.delete(callId);
-    try {
-      const call = await db.get("SELECT * FROM calls WHERE id=? AND rtc_mode=1 AND status='ringing'", [callId]);
-      if (!call || now() - call.started_at < 70000) return;
-      await db.run("UPDATE calls SET status='ended',ended_at=?,hangup_cause='timeout' WHERE id=? AND status='ringing'", [now(), callId]);
-      const caller = await db.get('SELECT phone FROM users WHERE id=?', [call.user_id]);
-      const callee = call.callee_user_id ? await db.get('SELECT phone FROM users WHERE id=?', [call.callee_user_id]) : null;
-      if (caller) sendTo(caller.phone, { type: 'hangup', call_id: callId, reason: 'timeout' });
-      if (callee && isOnline(callee.phone)) sendTo(callee.phone, { type: 'hangup', call_id: callId, reason: 'timeout' });
-      if (callee && !isForeground(callee.phone)) {
-        await push.sendUser(call.callee_user_id, {
-          data: { kind: 'call_cancel', call_id: callId, from_phone: caller?.phone || '', reason: 'timeout' },
-          title: 'Appel manqué', body: caller?.phone || 'Appel MboteCall', channel: 'calls',
-          collapseKey: `call-${callId}`,
-        });
-      }
-    } catch {
-      // L'expiration sera reprise à la prochaine connexion si la base était indisponible.
-    }
-  }, 75000);
-  if (timer.unref) timer.unref();
-  callTimers.set(callId, timer);
+/** L'appelé a donné signe de vie : plus de doute, plus de renfort */
+function onRingAck(call) {
+  if (call.state !== 'ringing' || call.ringAck) return;
+  call.ringAck = true;
+  clearTimeout(call.ghostTimer);
+  clearTimeout(call.wakeTimer);
+  call.ghostTimer = call.wakeTimer = null;
+  sendTo(call.caller, { type: 'ringing', call_id: call.id, from: call.callee });
 }
-
-async function deliverPendingOffers(ws, user) {
-  const rows = await db.all(`
-    SELECT c.id,c.offer_sdp,c.with_video,c.started_at,u.phone AS from_phone,u.name AS from_name,u.avatar AS from_avatar
-    FROM calls c JOIN users u ON u.id=c.user_id
-    WHERE c.callee_user_id=? AND c.rtc_mode=1 AND c.status='ringing'
-      AND c.offer_sdp IS NOT NULL AND c.started_at > ?
-    ORDER BY c.started_at ASC
-  `, [user.id, now() - 75000]);
-  for (const row of rows) {
-    let sdp;
-    try { sdp = JSON.parse(row.offer_sdp); } catch { continue; }
-    wsSend(ws, {
-      type: 'offer', call_id: row.id, from: row.from_phone, from_name: row.from_name,
-      from_avatar: row.from_avatar || null, has_video: row.with_video === true || row.with_video === 1, sdp,
-    });
-    callTimeout(row.id);
-  }
-}
-
-async function notifyPresenceReminders(user) {
-  const reminders = await db.all(`
-    SELECT pr.owner_id, u.name, u.phone
-    FROM presence_reminders pr JOIN users u ON u.id=pr.owner_id
-    WHERE pr.target_id=? AND pr.notified_at IS NULL AND u.notifications_enabled=1
-  `, [user.id]);
-  for (const reminder of reminders) {
-    const data = {
-      kind: 'presence_available', peer_phone: user.phone, peer_name: user.name || user.phone,
-      from_phone: user.phone, from_name: user.name || user.phone, preview: 'De nouveau en ligne',
-    };
-    sendTo(reminder.phone, { type: 'msg', ...data, from_phone: user.phone });
-    const sent = isForeground(reminder.phone) || await push.sendUser(reminder.owner_id, {
-      data, title: user.name || user.phone,
-      body: `${user.name || user.phone} est de nouveau en ligne`,
-      channel: 'messages', collapseKey: `presence-${user.id}`,
-    });
-    if (sent) await db.run('UPDATE presence_reminders SET notified_at=? WHERE owner_id=? AND target_id=? AND notified_at IS NULL', [now(), reminder.owner_id, user.id]);
-  }
-}
-
-function deliverPendingGroupInvites(ws, user) {
-  for (const [callId, room] of groupCalls) {
-    if (!room.invited.has(user.phone) || room.members.has(user.id)) continue;
-    const host = [...room.members.values()].find((m) => m.user.phone === room.creator);
-    if (!host) continue;
-    wsSend(ws, {
-      type: 'group_invite', call_id: callId, from: host.user.phone,
-      from_name: host.user.name, with_video: room.withVideo === true,
-      members: membersOf(room, null),
-    });
-  }
-}
-
-// ── Gestion des salles de groupe ─────────────────────────────────────────────
 
 /**
- * Retire un utilisateur de TOUTES ses salles actives.
- * Idempotent — sans effet si l'utilisateur n'est dans aucune salle.
+ * 📲 Réveille le téléphone de l'appelé par notification (data-only).
+ * Si l'app ne confirme pas sous 5 s → notification VISIBLE en renfort.
+ * → true si un push est parti (ou l'était déjà).
  */
-function leaveAllRooms(userId) {
-  for (const [callId, room] of groupCalls) {
-    _leaveRoom(callId, room, userId);
-  }
-}
-
-function _leaveRoom(callId, room, userId) {
-  const member = room.members.get(userId);
-  if (!member) return;
-  room.members.delete(userId);
-  roomBroadcast(room, {
-    type: 'group_peer_left',
-    call_id: callId,
-    phone: member.user.phone,
-    name: member.user.name,
-  });
-  if (room.members.size === 0) groupCalls.delete(callId);
-}
-
-// ── Gestionnaire de messages WebSocket ───────────────────────────────────────
-
-async function onMessage(ws, user, raw) {
-  let msg;
-  try { msg = JSON.parse(raw); } catch { return; }
-  const type = msg.type;
-  if (!type) return;
-
-  switch (type) {
-
-    // ── Ping applicatif (maintien de connexion) ──────────────────────────────
-    case 'ping':
-      wsSend(ws, { type: 'pong', t: msg.t });
-      break;
-
-    // ── Présence (fg / bg) — informatif ────────────────────────────────────
-    case 'presence':
-      ws._fg = msg.state === 'fg';
-      break;
-
-    // ── Signalement 1-1 : chaque échange appartient à un appel autorisé ─────
-    case 'offer':
-    case 'answer':
-    case 'ice':
-    case 'reoffer':
-    case 'reanswer':
-    case 'ringing':
-    case 'ack':
-    case 'reject':
-    case 'decline':
-    case 'hangup': {
-      const callId = String(msg.call_id || '').slice(0, 120);
-      const toPhone = normalizePhone(msg.to);
-      if (!callId || !toPhone) break;
-      const call = await db.get(`
-        SELECT c.*, callee.phone AS callee_phone, caller.phone AS caller_phone,
-               caller.name AS caller_name, caller.avatar AS caller_avatar
-        FROM calls c
-        JOIN users callee ON callee.id=c.callee_user_id
-        JOIN users caller ON caller.id=c.user_id
-        WHERE c.id=? AND c.rtc_mode=1
-      `, [callId]);
-      if (!call || call.status === 'ended' || (type === 'offer' && call.status !== 'ringing')) {
-        if (type === 'offer') wsSend(ws, { type: 'peer_offline', call_id: callId, to: toPhone });
-        break;
+async function wake(call) {
+  if (call.pushSent) return true;
+  if (!push.enabled()) return false;
+  const callee = await getUser(call.callee);
+  if (!callee || !callee.fcm_token || call.state !== 'ringing') return false;
+  const info = { callId: call.id, fromName: call.callerName, fromPhone: call.caller };
+  const ok = await push.sendCallPush(callee.fcm_token, info);
+  if (!ok) return false;
+  call.pushSent = true;
+  log(`📲 Réveil push → ${call.callee} (appel ${call.id})`);
+  call.wakeTimer = setTimeout(async () => {
+    call.wakeTimer = null;
+    if (call.state !== 'ringing' || call.ringAck) return;
+    try {
+      const c = await getUser(call.callee);
+      if (c && c.fcm_token && call.state === 'ringing' && !call.ringAck) {
+        await push.sendCallFallbackPush(c.fcm_token, info);
+        call.fallbackSent = true;
+        log(`🔔 Pas d'acquittement → notification visible → ${call.callee}`);
       }
-      const isCaller = call.user_id === user.id;
-      const isCallee = call.callee_user_id === user.id;
-      const expectedPhone = isCaller ? call.callee_phone : isCallee ? call.caller_phone : null;
-      if (!expectedPhone || toPhone !== expectedPhone) break;
-      const target = online.get(toPhone);
-
-      if (type === 'offer') {
-        const sdp = msg.sdp;
-        if (!isCaller || !sdp || sdp.type !== 'offer' || typeof sdp.sdp !== 'string' || sdp.sdp.length > 250000) break;
-        const withVideo = msg.has_video === true;
-        await db.run('UPDATE calls SET offer_sdp=?,with_video=? WHERE id=? AND status=\'ringing\'', [JSON.stringify(sdp), withVideo ? 1 : 0, callId]);
-        const offer = {
-          type: 'offer', call_id: callId, from: user.phone, from_name: user.name,
-          from_avatar: user.avatar || null, has_video: withVideo, sdp,
-        };
-        if (target) wsSend(target, offer);
-        if (!target || !isForeground(toPhone)) {
-          const delivered = await push.sendUser(call.callee_user_id, {
-            data: { kind: 'incoming_call', call_id: callId, from_phone: user.phone, from_name: user.name || user.phone, with_video: withVideo ? '1' : '0' },
-            title: withVideo ? 'Appel vidéo MboteCall' : 'Appel MboteCall',
-            body: `${user.name || user.phone} t’appelle`, channel: 'calls', collapseKey: `call-${callId}`,
-          });
-          if (delivered) wsSend(ws, { type: 'push-sent', call_id: callId });
-          else if (!target) wsSend(ws, { type: 'peer_offline', call_id: callId, to: toPhone });
-        }
-        callTimeout(callId);
-        break;
-      }
-
-      if (type === 'answer') {
-        const sdp = msg.sdp;
-        if (!isCallee || !sdp || sdp.type !== 'answer' || typeof sdp.sdp !== 'string' || sdp.sdp.length > 250000) break;
-        await db.run("UPDATE calls SET status='answered',answered_at=COALESCE(answered_at,?) WHERE id=? AND status='ringing'", [now(), callId]);
-        clearTimeout(callTimers.get(callId));
-        callTimers.delete(callId);
-        if (target) wsSend(target, { ...msg, from: user.phone });
-        if (!isForeground(call.caller_phone)) await push.sendUser(call.user_id, {
-          data: { kind: 'call_cancel', call_id: callId, from_phone: call.callee_phone, reason: 'answered' },
-          title: 'Appel répondu', body: 'Ton appel a été répondu', channel: 'calls', collapseKey: `call-${callId}`,
-        });
-        break;
-      }
-
-      if (type === 'reject' || type === 'decline' || type === 'hangup') {
-        if (type !== 'hangup' && !isCallee) break;
-        const reason = type === 'hangup' ? (msg.reason === 'timeout' ? 'timeout' : 'cancel') : (msg.reason === 'busy' ? 'busy' : 'declined');
-        await db.run("UPDATE calls SET status='ended',ended_at=?,hangup_cause=? WHERE id=? AND status!='ended'", [now(), reason, callId]);
-        clearTimeout(callTimers.get(callId));
-        callTimers.delete(callId);
-        if (target) wsSend(target, { type: type === 'hangup' ? 'hangup' : 'reject', call_id: callId, reason, from: user.phone });
-        else {
-          const targetId = isCaller ? call.callee_user_id : call.user_id;
-          const fromPhone = isCaller ? call.caller_phone : call.callee_phone;
-          await push.sendUser(targetId, {
-            data: { kind: 'call_cancel', call_id: callId, from_phone: fromPhone, reason },
-            title: reason === 'declined' ? 'Appel refusé' : 'Appel terminé',
-            body: reason === 'declined' ? 'Ton appel a été refusé' : 'L’appel est terminé',
-            channel: 'calls', collapseKey: `call-${callId}`,
-          });
-        }
-        break;
-      }
-
-      if (type === 'ringing' && !isCallee) break;
-      if (type === 'reoffer' && !isCaller) break;
-      if (type === 'reanswer' && !isCallee) break;
-      if (type === 'ice' && !isCaller && !isCallee) break;
-      if (type === 'reoffer' || type === 'reanswer') {
-        const expectedType = type === 'reoffer' ? 'offer' : 'answer';
-        if (!msg.sdp || msg.sdp.type !== expectedType || typeof msg.sdp.sdp !== 'string' || msg.sdp.sdp.length > 250000) break;
-      }
-      if (type === 'ice' && (!msg.candidate || typeof msg.candidate !== 'object' ||
-          (typeof msg.candidate.candidate === 'string' && msg.candidate.candidate.length > 10000))) break;
-      if (target) wsSend(target, { ...msg, from: user.phone });
-      else if (type === 'ringing') wsSend(ws, { type: 'peer_offline', call_id: callId, to: toPhone });
-      break;
-    }
-
-    // ── Appel de groupe : rejoindre ──────────────────────────────────────────
-    case 'group_join': {
-      const callId = String(msg.call_id || '');
-      if (!/^[A-Za-z0-9_-]{1,120}$/.test(callId)) break;
-
-      let room = groupCalls.get(callId);
-
-      // Salle inexistante → l'émetteur la crée et en devient l'hôte
-      if (!room) {
-        room = {
-          members: new Map(),
-          invited: new Set(),   // téléphones autorisés à rejoindre
-          allowed: new Set(),
-          withVideo: msg.with_video === true,
-          creator: user.phone,
-          createdAt: Date.now(),
-        };
-        groupCalls.set(callId, room);
-      }
-
-      // Idempotent : déjà dans la salle → on renvoie l'état actuel
-      if (room.members.has(user.id)) {
-        wsSend(ws, {
-          type: 'group_joined',
-          call_id: callId,
-          members: membersOf(room, user.id),
-        });
-        break;
-      }
-
-      // 🔒 Autorisation : seuls l'hôte et les invités entrent. Sans ce
-      // contrôle, connaître un call_id suffirait pour écouter une salle.
-      if (room.creator !== user.phone && !room.allowed.has(user.phone)) {
-        wsSend(ws, {
-          type: 'group_error',
-          call_id: callId,
-          reason: 'not_authorized',
-        });
-        break;
-      }
-
-      // Salle pleine
-      if (room.members.size >= MAX_GROUP_MEMBERS) {
-        wsSend(ws, { type: 'group_error', call_id: callId, reason: 'room_full' });
-        break;
-      }
-
-      // Notifier les membres existants
-      roomBroadcast(room, {
-        type: 'group_peer_joined',
-        call_id: callId,
-        phone: user.phone,
-        name: user.name,
-      });
-
-      // Ajouter le membre
-      room.members.set(user.id, { ws, user });
-      room.invited.delete(user.phone); // invitation consommée
-
-      // Envoyer la liste des membres actuels au nouvel arrivant
-      wsSend(ws, {
-        type: 'group_joined',
-        call_id: callId,
-        members: membersOf(room, user.id),
-      });
-      break;
-    }
-
-    // ── Appel de groupe : inviter un contact ────────────────────────────────
-    case 'group_invite': {
-      const callId = String(msg.call_id || '');
-      const toPhone = normalizePhone(msg.to);
-      if (!/^[A-Za-z0-9_-]{1,120}$/.test(callId) || !toPhone) break;
-
-      const room = groupCalls.get(callId);
-      // Seul un membre de la salle peut inviter
-      if (!room || !room.members.has(user.id)) {
-        wsSend(ws, {
-          type: 'group_error',
-          call_id: callId,
-          reason: 'not_authorized',
-        });
-        break;
-      }
-
-      if (toPhone === user.phone) break; // s'inviter soi-même : sans objet
-
-      // Déjà présent → rien à faire
-      const already = [...room.members.values()]
-        .some(m => m.user.phone === toPhone);
-      if (already) break;
-      if (room.invited.has(toPhone)) break;
-
-      // La place doit exister : membres présents + invitations en attente
-      if (room.members.size + room.invited.size >= MAX_GROUP_MEMBERS) {
-        wsSend(ws, { type: 'group_error', call_id: callId, reason: 'room_full' });
-        break;
-      }
-
-      const target = online.get(toPhone);
-      const invitee = await db.get('SELECT id,status FROM users WHERE phone=?', [toPhone]);
-      if (!invitee || invitee.status === 'blocked') {
-        room.invited.delete(toPhone);
-        room.allowed.delete(toPhone);
-        wsSend(ws, { type: 'group_error', call_id: callId, reason: 'unknown_user', phone: toPhone });
-        break;
-      }
-      room.invited.add(toPhone);
-      room.allowed.add(toPhone);
-      room.withVideo = room.withVideo || msg.with_video === true;
-      const invitation = {
-        type: 'group_invite', call_id: callId, from: user.phone, from_name: user.name,
-        with_video: room.withVideo, members: membersOf(room, null),
-      };
-      if (target) {
-        wsSend(target, invitation);
-        if (!isForeground(toPhone)) await push.sendUser(invitee.id, {
-          data: { kind: 'group_invite', call_id: callId, from_phone: user.phone, from_name: user.name || user.phone, with_video: room.withVideo ? '1' : '0' },
-          title: 'Invitation Mbote Famille',
-          body: `${user.name || user.phone} t’invite à un appel de groupe`,
-          channel: 'calls', collapseKey: `group-${callId}`,
-        });
-      } else {
-        const delivered = await push.sendUser(invitee.id, {
-          data: { kind: 'group_invite', call_id: callId, from_phone: user.phone, from_name: user.name || user.phone, with_video: room.withVideo ? '1' : '0' },
-          title: 'Invitation Mbote Famille',
-          body: `${user.name || user.phone} t’invite à un appel de groupe`,
-          channel: 'calls', collapseKey: `group-${callId}`,
-        });
-        if (!delivered) {
-          room.invited.delete(toPhone);
-          room.allowed.delete(toPhone);
-          wsSend(ws, { type: 'group_error', call_id: callId, reason: 'peer_offline', phone: toPhone });
-        }
-      }
-      break;
-    }
-
-    // ── Appel de groupe : quitter ────────────────────────────────────────────
-    case 'group_leave': {
-      const callId = msg.call_id;
-      if (!callId) break;
-      const room = groupCalls.get(callId);
-      if (room) _leaveRoom(callId, room, user.id);
-      break;
-    }
-
-    // ── Signalement de groupe (offre / réponse / ICE) ───────────────────────
-    case 'group_offer':
-    case 'group_answer':
-    case 'group_ice': {
-      const callId = String(msg.call_id || '');
-      const toPhone = normalizePhone(msg.to);
-      if (!/^[A-Za-z0-9_-]{1,120}$/.test(callId) || !toPhone) break;
-
-      if (type === 'group_offer' || type === 'group_answer') {
-        const expectedType = type === 'group_offer' ? 'offer' : 'answer';
-        if (!msg.sdp || msg.sdp.type !== expectedType || typeof msg.sdp.sdp !== 'string' || msg.sdp.sdp.length > 250000) break;
-      } else if (!msg.candidate || typeof msg.candidate !== 'object' ||
-          (typeof msg.candidate.candidate === 'string' && msg.candidate.candidate.length > 10000)) break;
-
-      const room = groupCalls.get(callId);
-      if (!room || !room.members.has(user.id)) break; // expéditeur doit être dans la salle
-
-      const target = [...room.members.values()].find(m => m.user.phone === toPhone);
-      if (!target) break;
-
-      wsSend(target.ws, { ...msg, from: user.phone });
-      break;
-    }
-
-    // ── Mise à jour micro/caméra ─────────────────────────────────────────────
-    case 'group_mute': {
-      const callId = msg.call_id;
-      if (!callId) break;
-      const room = groupCalls.get(callId);
-      if (!room || !room.members.has(user.id)) break;
-      roomBroadcast(room, { ...msg, from: user.phone }, user.id);
-      break;
-    }
-  }
-}
-
-// ── Entretien : salles vides ou abandonnées ─────────────────────────────────
-
-/** Durée au-delà de laquelle une salle sans membre connecté est jetée */
-const ROOM_MAX_AGE_MS = 12 * 60 * 60 * 1000; // 12 h
-
-function sweepRooms() {
-  const now = Date.now();
-  for (const [callId, room] of groupCalls) {
-    // Purge les membres dont la connexion est morte sans événement 'close'
-    for (const [uid, m] of room.members) {
-      if (!m.ws || m.ws.readyState !== WebSocket.OPEN) _leaveRoom(callId, room, uid);
-    }
-    if (room.members.size === 0 || now - room.createdAt > ROOM_MAX_AGE_MS) {
-      groupCalls.delete(callId);
-    }
-  }
-}
-
-async function endCall(callId, reason = 'cancel') {
-  clearTimeout(callTimers.get(callId));
-  callTimers.delete(callId);
-  const call = await db.get('SELECT * FROM calls WHERE id=? AND rtc_mode=1', [callId]);
-  if (!call) return false;
-  const caller = await db.get('SELECT phone,name FROM users WHERE id=?', [call.user_id]);
-  const callee = call.callee_user_id ? await db.get('SELECT phone,name FROM users WHERE id=?', [call.callee_user_id]) : null;
-  const declined = reason === 'declined' || reason === 'busy';
-  const targetId = declined ? call.user_id : call.callee_user_id;
-  const target = declined ? caller : callee;
-  if (!targetId || !target) return false;
-  const type = declined ? 'reject' : 'hangup';
-  const msg = { type, call_id: callId, reason, from: declined ? callee.phone : caller.phone };
-  if (isOnline(target.phone)) sendTo(target.phone, msg);
-  if (!isForeground(target.phone)) await push.sendUser(targetId, {
-    data: { kind: 'call_cancel', call_id: callId, from_phone: declined ? callee.phone : caller.phone, reason },
-    title: declined ? 'Appel refusé' : 'Appel terminé',
-    body: declined ? 'Ton appel a été refusé' : 'L’appel est terminé',
-    channel: 'calls', collapseKey: `call-${callId}`,
-  });
+    } catch (_) {}
+  }, WAKE_ACK_MS);
+  if (call.wakeTimer.unref) call.wakeTimer.unref();
   return true;
 }
 
-async function sweepExpiredCalls() {
-  const expired = await db.all("SELECT id,user_id,callee_user_id FROM calls WHERE rtc_mode=1 AND status='ringing' AND started_at <= ?", [now() - 75000]);
-  for (const call of expired) {
-    await db.run("UPDATE calls SET status='ended',ended_at=?,hangup_cause='timeout' WHERE id=? AND status='ringing'", [now(), call.id]);
-    const caller = await db.get('SELECT phone FROM users WHERE id=?', [call.user_id]);
-    const callee = call.callee_user_id ? await db.get('SELECT phone FROM users WHERE id=?', [call.callee_user_id]) : null;
-    if (caller) sendTo(caller.phone, { type: 'hangup', call_id: call.id, reason: 'timeout' });
-    if (callee && isOnline(callee.phone)) sendTo(callee.phone, { type: 'hangup', call_id: call.id, reason: 'timeout' });
-    if (callee && !isForeground(callee.phone)) await push.sendUser(call.callee_user_id, {
-      data: { kind: 'call_cancel', call_id: call.id, from_phone: caller?.phone || '', reason: 'timeout' },
-      title: 'Appel manqué', body: caller?.phone || 'Appel MboteCall', channel: 'calls',
-      collapseKey: `call-${call.id}`,
-    });
+/** 👻 L'appelé a un socket qui ne répond pas → on le ferme et on passe au push */
+function armGhostGuard(call) {
+  clearTimeout(call.ghostTimer);
+  call.ghostTimer = setTimeout(async () => {
+    call.ghostTimer = null;
+    if (call.state !== 'ringing' || call.ringAck) return;
+    const cur = online.get(call.callee);
+    if (cur) {
+      try { cur.ws.terminate(); } catch (_) {}
+      online.delete(call.callee);
+    }
+    log(`👻 WS fantôme chez ${call.callee} → bascule sur notification push`);
+    call.delivered = false;
+    const ok = await wake(call);
+    if (call.state !== 'ringing') return;
+    if (ok) {
+      sendTo(call.caller, { type: 'push-sent', call_id: call.id });
+    } else {
+      finish(call);
+      sendTo(call.caller, { type: 'peer-offline', call_id: call.id });
+    }
+  }, GHOST_MS);
+  if (call.ghostTimer.unref) call.ghostTimer.unref();
+}
+
+/**
+ * 🚫 Fait disparaître l'écran d'appel chez l'appelé (push d'annulation) et
+ * laisse « Appel manqué » dans sa barre. Seulement si on l'avait réveillé.
+ */
+async function notifyCancelled(call) {
+  if (!call.pushSent) return;
+  try {
+    const callee = await getUser(call.callee);
+    if (!callee || !callee.fcm_token) return;
+    await push.sendCallCancelPush(callee.fcm_token,
+      { callId: call.id, fromPhone: call.caller, reason: 'cancel' });
+    await push.sendMissedCallPush(callee.fcm_token, call.callerName, call.caller);
+    log(`📵 Appel manqué notifié : ${call.caller} → ${call.callee}`);
+  } catch (_) {}
+}
+
+/** L'appelant renonce (hangup, déconnexion…) pendant que ça sonne */
+function cancelByCaller(call, reason) {
+  if (call.state !== 'ringing') return;
+  finish(call);
+  sendTo(call.callee, {
+    type: 'hangup', call_id: call.id, from: call.caller, reason: reason || 'cancel',
+  });
+  notifyCancelled(call).catch(() => {});
+  log(`🧹 Appel annulé (${reason || 'hangup'}) : ${call.caller} → ${call.callee}`);
+}
+
+/** Personne n'a décroché dans le délai */
+function expireCall(call) {
+  if (call.state !== 'ringing') return;
+  finish(call);
+  sendTo(call.callee, { type: 'hangup', call_id: call.id, from: call.caller, reason: 'timeout' });
+  sendTo(call.caller, { type: 'peer-offline', call_id: call.id });
+  notifyCancelled(call).catch(() => {});
+  log(`⌛ Appel expiré : ${call.caller} → ${call.callee}`);
+}
+
+/* ───────────── API HTTP (app tuée : pas de WebSocket) ───────────── */
+
+/** Le téléphone appelé confirme qu'il sonne (réveil par push réussi) */
+function ackCall(phone, callId) {
+  const call = calls.get(String(callId || ''));
+  if (!call || call.callee !== phone || call.state !== 'ringing') return false;
+  onRingAck(call);
+  log(`✅ Acquittement HTTP : ${phone} sonne (appel ${call.id})`);
+  return true;
+}
+
+/** Refus depuis la notification d'appel (l'app n'a pas de WebSocket) */
+function declineCall(phone, callId) {
+  const call = calls.get(String(callId || ''));
+  if (!call || call.callee !== phone || call.state !== 'ringing') return false;
+  finish(call);
+  sendTo(call.caller, { type: 'reject', call_id: call.id, from: phone, reason: 'declined' });
+  log(`🙅 Refus HTTP : ${phone} → ${call.caller}`);
+  return true;
+}
+
+/** 💬 Prévient l'appli du destinataire (instantané, sans passer par FCM) */
+function notifyMessage(toPhone, payload) {
+  const p = normalizePhone(toPhone);
+  return p ? sendTo(p, { type: 'msg', ...payload }) : false;
+}
+
+/* ───────────── Relais générique (appels inconnus du standardiste) ───────────── */
+
+function forward(user, type, msg, to) {
+  const fwd = {
+    type,
+    call_id: msg.call_id,
+    from: user.phone,
+    ...(msg.reason ? { reason: String(msg.reason).slice(0, 30) } : {}),
+    ...(type === 'offer' ? {
+      from_name: user.name || '', from_avatar: user.avatar || null, sdp: msg.sdp,
+    } : {}),
+    ...((type === 'answer' || type === 'reoffer' || type === 'reanswer') ? { sdp: msg.sdp } : {}),
+    ...(type === 'ice' ? { candidate: msg.candidate } : {}),
+  };
+  return sendTo(to, fwd);
+}
+
+/* ───────────── Traitement des messages ───────────── */
+
+async function onOffer(ws, user, msg, to) {
+  const callId = String(msg.call_id || '');
+  if (!callId || callId.length > 80 || !to || to === user.phone) return;
+  if (calls.has(callId)) return; // offre déjà reçue (renvoi) : idempotent
+
+  if (!allowOffer(user.phone)) {
+    send(ws, { type: 'reject', call_id: callId, from: to, reason: 'busy' });
+    return;
+  }
+  // 📵 Un autre appelant fait déjà sonner ce numéro → « occupé » immédiat
+  for (const c of calls.values()) {
+    if (c.callee === to && c.state === 'ringing' && c.caller !== user.phone) {
+      send(ws, { type: 'reject', call_id: callId, from: to, reason: 'busy' });
+      log(`📵 Occupé : ${to} sonne déjà pour ${c.caller} (refus de ${user.phone})`);
+      return;
+    }
+  }
+  // Un ancien appel du même appelant vers le même numéro est abandonné
+  for (const c of calls.values()) {
+    if (c.caller === user.phone && c.state === 'ringing') cancelByCaller(c, 'replaced');
+  }
+
+  const call = {
+    id: callId, caller: user.phone, callerName: user.name || '', callee: to,
+    state: 'ringing', createdAt: Date.now(),
+    offerMsg: {
+      type: 'offer', call_id: callId, from: user.phone,
+      from_name: user.name || '', from_avatar: user.avatar || null, sdp: msg.sdp,
+    },
+    ice: [], ringAck: false, pushSent: false, fallbackSent: false, delivered: false,
+    ghostTimer: null, wakeTimer: null, ttlTimer: null,
+  };
+  calls.set(callId, call);
+  call.ttlTimer = setTimeout(() => expireCall(call), RING_TTL);
+  if (call.ttlTimer.unref) call.ttlTimer.unref();
+
+  const entry = online.get(to);
+  if (entry && send(entry.ws, call.offerMsg)) {
+    call.delivered = true;
+    armGhostGuard(call);
+    // 📱 App connectée mais pas au premier plan : l'écran ne s'allumera pas
+    // tout seul → on réveille AUSSI par notification.
+    if (!entry.fg) {
+      wake(call).catch((e) => warn('⚠️ wake :', e.message));
+    }
+    return;
+  }
+  // 💤 App fermée : réveil par push, l'offre attend en salle d'attente
+  const ok = await wake(call);
+  if (call.state !== 'ringing') return;
+  if (ok) {
+    log(`📲 App fermée chez ${to} → réveil envoyé, appel en salle d'attente`);
+    send(ws, { type: 'push-sent', call_id: callId });
+  } else {
+    finish(call);
+    send(ws, { type: 'peer-offline', call_id: callId });
   }
 }
 
-let sweepTimer = null;
+async function onMessage(ws, user, raw) {
+  // 🛡️ Garde-fous : message trop gros ou rafale anormale → ignoré
+  if (raw.length > 200_000) return;
+  const t = Date.now();
+  if (!ws._win || t > ws._win.reset) ws._win = { n: 0, reset: t + 10_000 };
+  if (++ws._win.n > 400) return;
 
-// ── Initialisation du serveur WebSocket ─────────────────────────────────────
+  let msg;
+  try { msg = JSON.parse(raw.toString()); } catch (_) { return; }
+  if (!msg || typeof msg !== 'object') return;
+  const type = String(msg.type || '');
 
-function init(server) {
-  const wss = new WebSocket.Server({ server, path: '/ws', maxPayload: 1024 * 1024 });
+  if (type === 'ping') { send(ws, { type: 'pong', t: msg.t }); return; }
+  if (type === 'presence') {
+    const e = online.get(user.phone);
+    if (e && e.ws === ws) { e.fg = msg.state === 'fg'; e.fgAt = Date.now(); }
+    return;
+  }
+  if (type === 'typing') {
+    const to = normalizePhone(msg.to);
+    if (to) sendTo(to, { type: 'typing', from: user.phone });
+    return;
+  }
+  // ── Présence : "Rappelle-moi quand X se connecte" ──
+  if (type === 'watch') {
+    const target = normalizePhone(msg.target);
+    if (!target) return;
+    let set = presenceWatches.get(target);
+    if (!set) { set = new Set(); presenceWatches.set(target, set); }
+    set.add(user.id);
+    log(`👁️  watch : ${user.phone} surveille ${target}`);
+    return;
+  }
+  if (type === 'unwatch') {
+    const target = normalizePhone(msg.target);
+    if (target) { presenceWatches.get(target)?.delete(user.id); }
+    return;
+  }
 
-  wss.on('connection', async (ws, req) => {
-    const user = await authenticate(req);
-    if (!user) {
-      ws.close(4001, 'Unauthorized');
+  // ── Appels de groupe (Mesh P2P) ──
+  if (type === 'group_join') {
+    const gId = String(msg.call_id || '');
+    if (!gId) return;
+    let g = groupCalls.get(gId);
+
+    // Salle absente → l'émetteur la crée et en devient l'hôte
+    if (!g) {
+      g = { members: new Map(), invited: new Set(), host: user.phone, createdAt: Date.now() };
+      groupCalls.set(gId, g);
+    }
+
+    // Déjà dedans : on renvoie simplement l'état courant (idempotent)
+    if (g.members.has(user.phone)) {
+      send(ws, {
+        type: 'group_joined', call_id: gId,
+        peers: [...g.members.keys()].filter(p => p !== user.phone),
+      });
       return;
     }
 
-    // Remplacer une session existante (multi-appareil : code 4002)
-    const prev = online.get(user.phone);
-    const wasOnline = !!(prev && prev.readyState === WebSocket.OPEN);
-    if (prev && prev !== ws && prev.readyState === WebSocket.OPEN) {
-      prev.close(4002, 'Replaced');
+    // 🔒 Autorisation : seuls l'hôte et les invités entrent. Sans ce contrôle,
+    // connaître un call_id suffirait pour écouter une conversation privée.
+    if (g.host !== user.phone && !g.invited.has(user.phone)) {
+      send(ws, { type: 'group_error', call_id: gId, reason: 'not_authorized' });
+      return;
     }
-    ws._fg = true;
-    online.set(user.phone, ws);
-    await db.run('UPDATE users SET last_seen_at=? WHERE id=?', [now(), user.id]);
-    if (!wasOnline && user.presence_visible !== 0) await notifyPresenceReminders(user);
 
-    ws.on('message', (data) => {
-      onMessage(ws, user, data.toString()).catch(() => console.error('WS message processing failed'));
-    });
+    // 🚧 Limite de participants
+    if (g.members.size >= MAX_GROUP_MEMBERS) {
+      send(ws, { type: 'group_error', call_id: gId, reason: 'room_full' });
+      return;
+    }
 
-    deliverPendingOffers(ws, user).catch(() => {});
-    deliverPendingGroupInvites(ws, user);
-
-    ws.on('close', () => {
-      if (online.get(user.phone) === ws) {
-        online.delete(user.phone);
-        db.run('UPDATE users SET last_seen_at=? WHERE id=?', [now(), user.id]).catch(() => {});
-        leaveAllRooms(user.id);
-      }
-    });
-
-    ws.on('error', (e) => console.error(`WS [${user.phone}] error:`, e.message));
-  });
-
-  if (!sweepTimer) {
-    sweepTimer = setInterval(sweepRooms, 5 * 60 * 1000); // toutes les 5 min
-    if (sweepTimer.unref) sweepTimer.unref(); // ne retient pas le process
+    // Prévenir les membres existants qu'un pair vient d'arriver
+    for (const [, m] of g.members) {
+      send(m.ws, { type: 'group_peer_joined', call_id: gId, from: user.phone, from_name: user.name });
+    }
+    g.members.set(user.phone, { ws, user });
+    g.invited.delete(user.phone);   // invitation consommée
+    // Renvoyer la liste des membres actuels à l'arrivant
+    const peers = [...g.members.keys()].filter(p => p !== user.phone);
+    send(ws, { type: 'group_joined', call_id: gId, peers });
+    log(`👥 group_join : ${user.phone} → ${gId} (${g.members.size}/${MAX_GROUP_MEMBERS})`);
+    return;
   }
-  const callSweep = setInterval(() => sweepExpiredCalls().catch(() => {}), 15000);
-  if (callSweep.unref) callSweep.unref();
+  if (type === 'group_leave') {
+    const gId = String(msg.call_id || '');
+    const g = groupCalls.get(gId);
+    if (g) {
+      g.members.delete(user.phone);
+      for (const [, m] of g.members) {
+        send(m.ws, { type: 'group_peer_left', call_id: gId, from: user.phone });
+      }
+      if (g.members.size === 0) groupCalls.delete(gId);
+    }
+    return;
+  }
+  // 👥 Invitation : enregistre l'autorisation puis relaie
+  if (type === 'group_invite') {
+    const gId = String(msg.call_id || '');
+    const to  = normalizePhone(msg.to);
+    const g   = groupCalls.get(gId);
+    // Seul un membre de la salle peut inviter
+    if (!g || !g.members.has(user.phone)) {
+      send(ws, { type: 'group_error', call_id: gId, reason: 'not_authorized' });
+      return;
+    }
+    if (!to || to === user.phone) return;
+    if (g.members.has(to)) return;             // déjà présent
+    // La place doit exister : membres + invitations en attente
+    if (g.members.size + g.invited.size >= MAX_GROUP_MEMBERS) {
+      send(ws, { type: 'group_error', call_id: gId, reason: 'room_full' });
+      return;
+    }
+    g.invited.add(to);
+    const toEntry = online.get(to);
+    if (toEntry) {
+      send(toEntry.ws, {
+        ...msg, from: user.phone, from_name: user.name,
+        peers: [...g.members.keys()],
+      });
+    } else {
+      // Pas de réveil par push pour les invitations de groupe : on le dit à
+      // l'inviteur plutôt que de laisser l'invitation disparaître en silence.
+      send(ws, { type: 'group_error', call_id: gId, reason: 'peer_offline', phone: to });
+    }
+    return;
+  }
 
-  console.log('✅ Signalement WebSocket actif sur /ws');
+  // 🔇 État micro/caméra diffusé aux autres membres (badges distants)
+  if (type === 'group_mute') {
+    const gId = String(msg.call_id || '');
+    const g   = groupCalls.get(gId);
+    if (!g || !g.members.has(user.phone)) return;
+    for (const [ph, m] of g.members) {
+      if (ph !== user.phone) send(m.ws, { ...msg, from: user.phone });
+    }
+    return;
+  }
+
+  if (['group_offer', 'group_answer', 'group_ice'].includes(type)) {
+    const gId = String(msg.call_id || '');
+    const to  = normalizePhone(msg.to);
+    const g   = groupCalls.get(gId);
+    // Émetteur ET destinataire doivent être dans la salle : sinon n'importe
+    // quel compte connecté pourrait injecter du SDP dans une conversation.
+    if (!g || !g.members.has(user.phone)) return;
+    if (to && g.members.has(to)) {
+      const toEntry = online.get(to);
+      if (toEntry) send(toEntry.ws, { ...msg, from: user.phone });
+    }
+    return;
+  }
+
+  if (!['offer', 'answer', 'ice', 'reject', 'hangup', 'ringing', 'reoffer', 'reanswer'].includes(type)) return;
+
+  const callId = String(msg.call_id || '');
+  const call = calls.get(callId);
+  let to = normalizePhone(msg.to);
+  if (type !== 'ice') {
+    log(`📨 WS ${type} : ${user.phone} → ${to} ${to && online.has(to) ? '✓' : '✗ hors ligne'}`);
+  }
+
+  if (type === 'offer') { await onOffer(ws, user, msg, to); return; }
+
+  /* ── Appel connu du standardiste : routage strict entre les deux parties ── */
+  if (call) {
+    const isCaller = user.phone === call.caller;
+    const isCallee = user.phone === call.callee;
+    if (!isCaller && !isCallee) return; // un tiers ne peut rien injecter
+    to = isCaller ? call.callee : call.caller;
+    if (call.state === 'ended' && type !== 'hangup') {
+      // Signal tardif. Si l'appelé décroche un appel déjà expiré/annulé, on le
+      // lui dit tout de suite (sinon il resterait bloqué sur « connexion »).
+      if (type === 'answer' && isCallee) {
+        send(ws, { type: 'hangup', call_id: call.id, from: call.caller, reason: 'ended' });
+      }
+      return;
+    }
+
+    switch (type) {
+      case 'ringing':
+        if (isCallee) onRingAck(call);
+        return;
+
+      case 'answer':
+        if (!isCallee || call.state !== 'ringing') return;
+        call.state = 'answered';
+        call.answeredAt = Date.now();
+        call.ringAck = true;
+        clearTimers(call);
+        call.ice = [];
+        call.offerMsg = null;
+        forward(user, 'answer', msg, to);
+        // 🔕 Réponse : tout écran d'appel resté ailleurs (push) doit disparaître
+        if (call.pushSent) {
+          getUser(call.callee).then((c) => {
+            if (c && c.fcm_token) push.sendCallCancelPush(c.fcm_token,
+              { callId: call.id, fromPhone: call.caller, reason: 'answered' });
+          }).catch(() => {});
+        }
+        return;
+
+      case 'ice':
+        if (call.state === 'ringing' && isCaller) {
+          // Mémorisé pour rejeu (socket fantôme, app réveillée par push…)
+          if (call.ice.length < MAX_CALL_ICE) {
+            call.ice.push({ call_id: call.id, candidate: msg.candidate });
+          }
+        }
+        forward(user, 'ice', msg, to);
+        return;
+
+      case 'reject':
+        if (!isCallee || call.state !== 'ringing') return;
+        finish(call);
+        forward(user, 'reject', msg, to);
+        return;
+
+      case 'hangup':
+        if (call.state === 'ringing') {
+          if (isCaller) { cancelByCaller(call, msg.reason); return; }
+          // l'appelé raccroche pendant la sonnerie = refus
+          finish(call);
+          forward(user, 'reject', { ...msg, reason: msg.reason || 'declined' }, to);
+          return;
+        }
+        if (call.state === 'answered') finish(call); // trace brève puis purge
+        forward(user, 'hangup', msg, to);
+        return;
+
+      default: // reoffer / reanswer
+        forward(user, type, msg, to);
+        return;
+    }
+  }
+
+  /* ── Appel inconnu (serveur redémarré en pleine conversation) : relais simple ── */
+  if (!to) return;
+  forward(user, type, msg, to);
 }
 
-// ── Exports ──────────────────────────────────────────────────────────────────
+/* ───────────── Initialisation ───────────── */
 
-module.exports = {
-  init,
-  isOnline,
-  isForeground,
-  /** Envoyer un message à un utilisateur connecté (depuis un autre module) */
-  sendTo: (phone, msg) => {
-    return sendTo(phone, msg);
-  },
-  endCall,
-  /** Accès debug (tests) */
-  _groupCalls: groupCalls,
-  _sweepRooms: sweepRooms,
-};
+function init(server) {
+  const wss = new WebSocket.Server({ server, path: '/ws', maxPayload: 256 * 1024 });
+
+  wss.on('connection', async (ws, req) => {
+    let user;
+    try {
+      const url = new URL(req.url, 'http://x');
+      const payload = verifyToken(url.searchParams.get('token') || '');
+      if (!payload) throw new Error('jeton invalide');
+      user = await db.get(
+        `SELECT id, phone, name, avatar FROM users WHERE id = ? AND status = 'active'`,
+        [payload.uid]);
+    } catch (_) { /* jeton invalide */ }
+    if (!user) return ws.close(4001, 'auth');
+
+    // Une seule connexion par numéro : la nouvelle remplace l'ancienne.
+    // Code 4002 = « remplacée » : l'ancien appareil ne boucle pas en reconnexion.
+    const prev = online.get(user.phone);
+    if (prev && prev.ws !== ws) { try { prev.ws.close(4002, 'replaced'); } catch (_) {} }
+    // fg=false par défaut : l'app annonce son état juste après (presence)
+    online.set(user.phone, { ws, user, fg: false, fgAt: 0 });
+    log(`🔌 WS connecté : ${user.phone} (${online.size} en ligne)`);
+    ws._phone = user.phone;
+    ws._alive = true;
+    ws.on('pong', () => { ws._alive = true; });
+
+    // 📬 Appels qui attendaient ce téléphone (réveil par push, reconnexion…)
+    for (const call of calls.values()) {
+      if (call.callee !== user.phone || call.state !== 'ringing' || !call.offerMsg) continue;
+      if (Date.now() - call.createdAt > RING_TTL) continue;
+      if (send(ws, call.offerMsg)) {
+        call.delivered = true;
+        for (const i of call.ice) {
+          send(ws, { type: 'ice', call_id: i.call_id, from: call.caller, candidate: i.candidate });
+        }
+        log(`📬 Appel en attente livré : ${call.caller} → ${user.phone}`);
+      }
+    }
+
+    // 📡 Présence : notifier les watchers que ce contact est de retour
+    {
+      const set = presenceWatches.get(user.phone);
+      if (set && set.size > 0) {
+        const watchers = [...set];
+        set.clear();  // une seule notification par session off→on
+        presenceWatches.delete(user.phone);
+        for (const watcherId of watchers) {
+          // Notifier en temps réel si le watcher est connecté
+          for (const [ph, e] of online) {
+            if (e.user.id === watcherId) {
+              send(e.ws, { type: 'contact_online', phone: user.phone, name: user.name });
+            }
+          }
+          // Notifier par push si le watcher est hors ligne
+          db.get('SELECT fcm_token FROM users WHERE id = ?', [watcherId]).then(w => {
+            if (w && w.fcm_token) {
+              push.sendData(w.fcm_token, {
+                kind: 'contact_online',
+                from_phone: user.phone,
+                from_name: user.name || '',
+              }).catch(() => {});
+            }
+          }).catch(() => {});
+        }
+      }
+    }
+
+    ws.on('message', (raw) => {
+      onMessage(ws, user, raw).catch((e) => warn('⚠️ WS message :', e.message));
+    });
+
+    ws.on('close', () => {
+      const cur = online.get(ws._phone);
+      if (cur && cur.ws === ws) {
+        online.delete(ws._phone);
+        log(`🔌 WS déconnecté : ${ws._phone} (${online.size} en ligne)`);
+        // 📅 Horodater la dernière vue
+        db.run('UPDATE users SET last_seen_at = ? WHERE phone = ?', [Date.now(), ws._phone]).catch(() => {});
+        // 🗑️ Retirer ce téléphone des appels de groupe actifs
+        for (const [gId, g] of groupCalls) {
+          if (g.members.has(ws._phone)) {
+            g.members.delete(ws._phone);
+            for (const [, m] of g.members) {
+              send(m.ws, { type: 'group_peer_left', call_id: gId, from: ws._phone });
+            }
+            if (g.members.size === 0) groupCalls.delete(gId);
+          }
+        }
+        // 🏃 L'appelant a disparu en pleine sonnerie ? Délai de grâce (micro-coupure)
+        const phone = ws._phone;
+        const timer = setTimeout(() => {
+          if (online.has(phone)) return; // il est revenu
+          for (const c of calls.values()) {
+            if (c.caller === phone && c.state === 'ringing') cancelByCaller(c, 'caller_gone');
+          }
+        }, CALLER_GONE_MS);
+        if (timer.unref) timer.unref();
+      }
+    });
+  });
+
+  // 💓 Battement de cœur (30 s) + ménage
+  setInterval(() => {
+    for (const [phone, { ws }] of online) {
+      if (!ws._alive) { try { ws.terminate(); } catch (_) {} online.delete(phone); continue; }
+      ws._alive = false;
+      try { ws.ping(); } catch (_) {}
+    }
+    const t = Date.now();
+    for (const [id, c] of calls) {
+      if (c.state === 'ended' && t - c.endedAt > ENDED_KEEP_MS) calls.delete(id);
+      else if (c.state === 'answered' && t - c.answeredAt > ANSWERED_MAX_MS) calls.delete(id);
+      else if (c.state === 'ringing' && t - c.createdAt > RING_TTL + 30_000) { finish(c); }
+    }
+    for (const [p, b] of offerBuckets) if (t > b.reset) offerBuckets.delete(p);
+  }, 30_000).unref();
+
+  log('🎙️  Canal temps réel /ws prêt (appels voix MboteCall)');
+}
+
+/** 🧪 Diagnostic (tests) */
+function _debug() {
+  return {
+    online: [...online.entries()].map(([p, e]) => ({ phone: p, fg: e.fg })),
+    calls: [...calls.values()].map((c) => ({
+      id: c.id, caller: c.caller, callee: c.callee, state: c.state,
+      ringAck: c.ringAck, pushSent: c.pushSent, fallbackSent: c.fallbackSent,
+    })),
+  };
+}
+
+/** Statut de présence d'un téléphone : {online: bool, lastSeenAt: number|null} */
+async function getPresence(phones) {
+  const result = {};
+  for (const phone of phones) {
+    const norm = normalizePhone(phone);
+    if (!norm) continue;
+    if (online.has(norm)) {
+      result[norm] = { online: true, lastSeenAt: null };
+    } else {
+      const u = await db.get('SELECT last_seen_at FROM users WHERE phone = ?', [norm]);
+      result[norm] = { online: false, lastSeenAt: u ? u.last_seen_at : null };
+    }
+  }
+  return result;
+}
+
+module.exports = { init, isOnline, ackCall, declineCall, notifyMessage, getPresence, presenceWatches, _debug };

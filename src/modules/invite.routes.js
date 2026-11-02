@@ -24,8 +24,15 @@ router.post('/api/invite', requireAuth, async (req, res) => {
     const token   = crypto.randomBytes(20).toString('hex');
     const now     = Date.now();
     await db.run(
-      `INSERT OR REPLACE INTO invite_tokens (token, user_id, referral_code, created_at, expires_at)
-       VALUES (?, ?, ?, ?, ?)`,
+      // ON CONFLICT plutôt que INSERT OR REPLACE : cette forme est portable
+      // SQLite/PostgreSQL, alors que OR REPLACE est propre à SQLite.
+      `INSERT INTO invite_tokens (token, user_id, referral_code, created_at, expires_at)
+       VALUES (?, ?, ?, ?, ?)
+       ON CONFLICT (token) DO UPDATE SET
+         user_id = excluded.user_id,
+         referral_code = excluded.referral_code,
+         created_at = excluded.created_at,
+         expires_at = excluded.expires_at`,
       [token, user.id, refCode, now, now + TOKEN_TTL_MS]
     );
     const link = `${DEEP_LINK_BASE}/invite/${token}`;

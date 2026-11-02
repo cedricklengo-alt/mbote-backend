@@ -1,25 +1,23 @@
 /**
  * ============================================================
  *  MBOTE! — Serveur principal (monolithe modulaire)
- *  Modules : auth · wallet · rating · calls · contacts · admin · feed · rtc
+ *  Modules : auth · wallet · rating · calls · contacts · admin · feed
+ *           présence · dial-later · invite
  * ============================================================
  */
 require('dotenv').config();
 const http    = require('http');
 const express = require('express');
-const path    = require('path');
-const db      = require('./db');
-const rtcWs   = require('./modules/rtc.ws');
+const path = require('path');
+const db = require('./db');
+const rtcWs = require('./modules/rtc.ws');
 
 const app = express();
-app.use(express.json({
-  limit: '12mb',
-  verify: (req, _res, buffer) => { req.rawBody = Buffer.from(buffer); },
-}));
+app.use(express.json());
 
 // Journal des requêtes (diagnostic)
 app.use((req, res, next) => {
-  console.log(`➡️  ${req.method} ${req.path}`);
+  console.log(`➡️  ${req.method} ${req.url}`);
   next();
 });
 
@@ -38,18 +36,32 @@ app.use('/api/wallet',   require('./modules/wallet.routes'));
 app.use('/api/rates',    require('./modules/rating.routes').router);
 app.use('/api/calls',    require('./modules/calls.routes'));
 app.use('/api/contacts', require('./modules/contacts.routes'));
-app.use('/api/referral', require('./modules/referral.routes'));
-app.use('/api/payments', require('./modules/payments.routes')); // webhook agrégateur (public)
-app.use('/api/admin',    require('./modules/admin.routes'));
-app.use('/api/feed',     require('./modules/feed.routes'));
-app.use('/api/rtc',      require('./modules/rtc.routes'));      // ICE servers + config WebRTC
-app.use('/api/packages', require('./modules/packages.routes'));
-app.use('/api/airtime',  require('./modules/airtime.routes'));
-app.use('/api/i18n',     require('./modules/i18n.routes'));
-app.use('/api/shop',     require('./modules/shop.routes'));
-const messageRoutes = require('./modules/messages.routes');
-app.use('/api/messages', messageRoutes.router);
-app.use('/api/lokota',   messageRoutes.lokota);
+app.use('/api/referral',   require('./modules/referral.routes'));
+app.use('/api/payments',   require('./modules/payments.routes')); // webhook agrégateur (public)
+app.use('/api/admin',      require('./modules/admin.routes'));
+app.use('/api/feed',       require('./modules/feed.routes'));
+app.use('/api/presence',   require('./modules/presence.routes'));
+app.use('/api/dial-later', require('./modules/dial_later.routes'));
+
+/* ---- Modules présents mais jamais montés (corrigé) ----
+ * Ces routeurs existaient dans src/modules/ sans être branchés ici : l'app
+ * cliente appelait /api/messages, /api/lokota, /api/shop, /api/packages,
+ * /api/airtime, /api/i18n et /api/rtc, qui répondaient donc 404.
+ * Conséquences observées : messagerie inopérante, boutique et forfaits
+ * inaccessibles, et surtout /api/rtc/ice injoignable — l'app retombait sur
+ * son repli STUN, donc aucun relais TURN et des appels qui échouent sur
+ * réseau mobile strict. */
+app.use('/api/rtc',       require('./modules/rtc.routes'));      // ICE/TURN + ack/decline
+app.use('/api/messages',  require('./modules/messages.routes')); // messagerie texte et vocale
+app.use('/api/lokota',    require('./modules/lokota.routes'));   // fils Lokota
+app.use('/api/shop',      require('./modules/shop.routes'));     // boutique et commandes
+app.use('/api/packages',  require('./modules/packages.routes')); // forfaits
+app.use('/api/airtime',   require('./modules/airtime.routes'));  // crédit téléphonique
+app.use('/api/i18n',      require('./modules/i18n.routes'));     // libellés traduits
+
+// Lien d'invitation magique (Feature B) — redirect public
+app.use('/invite',         require('./modules/invite.routes'));
+
 
 /* ---- Upload média (photos / clips) ---- */
 const { requireAuth } = require('./middleware/auth');
@@ -93,26 +105,19 @@ app.get('/api/health', (req, res) => res.json({
 
 /* ---- Gestion d'erreurs ---- */
 app.use((err, req, res, next) => {
-  const status = Number(err.status);
-  if (!status || status >= 500) console.error('💥', err);
-  res.status(status >= 400 && status < 500 ? status : 500).json({
-    error: status >= 400 && status < 500 ? err.message : 'Erreur interne',
-  });
+  console.error('💥', err);
+  res.status(500).json({ error: 'Erreur interne' });
 });
 
-/* ---- Démarrage ---- */
 const PORT = process.env.PORT || 4000;
 const server = http.createServer(app);
 
 db.init().then(() => {
-  // Attacher le serveur WebSocket après l'init DB
-  rtcWs.init(server);
-
+  rtcWs.init(server);           // ← WebSocket RTC (appels + présence + groupes)
   server.listen(PORT, '0.0.0.0', () => {
     console.log(`✅ MBOTE! backend démarré sur le port ${PORT}`);
     console.log(`   Base de données : ${db.name}`);
     console.log(`   Console admin   : http://localhost:${PORT}/admin`);
-    console.log(`   WebSocket RTC   : ws://localhost:${PORT}/ws`);
     console.log(`   Mode démo       : ${String(process.env.DEMO_MODE || 'true')}`);
   });
 }).catch((e) => {
