@@ -52,8 +52,10 @@ app.use('/api/dial-later', require('./modules/dial_later.routes'));
  * son repli STUN, donc aucun relais TURN et des appels qui échouent sur
  * réseau mobile strict. */
 app.use('/api/rtc',       require('./modules/rtc.routes'));      // ICE/TURN + ack/decline
-app.use('/api/messages',  require('./modules/messages.routes')); // messagerie texte et vocale
-app.use('/api/lokota',    require('./modules/lokota.routes'));   // fils Lokota
+const { router: messagesRouter, lokota: konversations } = require('./modules/messages.routes');
+app.use('/api/messages',  messagesRouter);    // messagerie texte et vocale
+app.use('/api/konversations', konversations); // fils de conversation (depuis messages.routes)
+app.use('/api/lokota',    require('./modules/lokota.routes'));   // notes vocales traduites Lokota
 app.use('/api/shop',      require('./modules/shop.routes'));     // boutique et commandes
 app.use('/api/packages',  require('./modules/packages.routes')); // forfaits
 app.use('/api/airtime',   require('./modules/airtime.routes'));  // crédit téléphonique
