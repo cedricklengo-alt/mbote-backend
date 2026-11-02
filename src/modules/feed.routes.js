@@ -20,10 +20,23 @@ r.get('/', requireAuth, ah(async (req, res) => {
   // Placeholders « ? » simples uniquement : le driver PostgreSQL les convertit
   // en $1, $2… séquentiellement, donc une forme numérotée « ?1 » produirait
   // « $11 » et casserait la requête en production.
+  // « Contacts » = l'auteur figure dans MA liste de contacts.
+  // (L'ancienne sous-requête testait l'inverse : elle affichait les posts des
+  // gens qui m'ont dans LEUR liste, et masquait les miens.)
+  const CONTACT_AUTHORS = `SELECT uc.id FROM contacts c
+                             JOIN users uc ON uc.phone = c.phone
+                            WHERE c.user_id = ?`;
+  // 📞 Le numéro de l'auteur n'est exposé que s'il est dans mes contacts (ou moi) :
+  // c'est ce qui rend le bouton « Appeler » utilisable, sans publier les numéros.
+  const AUTHOR_PHONE = `CASE WHEN p.user_id = ? OR p.user_id IN (${CONTACT_AUTHORS})
+                             THEN u.phone ELSE NULL END`;
+
   const posts = await db.all(`
     SELECT p.*,
            u.name    AS author_name,
            u.country AS author_country,
+           u.avatar  AS author_avatar,
+           ${AUTHOR_PHONE} AS author_phone,
            CASE WHEN pl.user_id IS NOT NULL THEN 1 ELSE 0 END AS liked
     FROM posts p
     JOIN users u ON u.id = p.user_id
@@ -33,17 +46,13 @@ r.get('/', requireAuth, ah(async (req, res) => {
         OR p.user_id = ?
         OR (
           p.visibilite = 'contacts'
-          AND p.user_id IN (
-            SELECT c.user_id FROM contacts c
-            JOIN users uc ON uc.phone = c.phone
-            WHERE uc.id = ?
-          )
+          AND p.user_id IN (${CONTACT_AUTHORS})
         )
       )
       AND (p.created_at < ? OR (p.created_at = ? AND p.id < ?))
     ORDER BY p.created_at DESC, p.id DESC
     LIMIT ?
-  `, [userId, userId, userId, before, before, cursor, limit + 1]);
+  `, [userId, userId, userId, userId, userId, before, before, cursor, limit + 1]);
 
   const hasMore = posts.length > limit;
   const items   = hasMore ? posts.slice(0, limit) : posts;
@@ -65,6 +74,7 @@ r.get('/stories', requireAuth, ah(async (req, res) => {
     SELECT s.*,
            u.name    AS author_name,
            u.country AS author_country,
+           u.avatar  AS author_avatar,
            CASE WHEN ss.user_id IS NOT NULL THEN 1 ELSE 0 END AS seen
     FROM stories s
     JOIN users u ON u.id = s.user_id
@@ -88,8 +98,10 @@ r.post('/posts', requireAuth, ah(async (req, res) => {
     texte,
     event_title,
     event_date,
+    event_lieu,
     event_tags,
     clip_duree_seconds,
+    ville,
   } = req.body;
 
   if (!['photo', 'clip', 'texte', 'event'].includes(type))
@@ -111,22 +123,27 @@ r.post('/posts', requireAuth, ah(async (req, res) => {
   await db.run(`
     INSERT INTO posts
       (id, user_id, type, origine, duree, visibilite,
-       media_url, texte, event_title, event_date, event_tags,
-       clip_sec, likes, comments, created_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?)
+       media_url, texte, event_title, event_date, event_lieu, event_tags,
+       clip_sec, ville, likes, comments, created_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?)
   `, [
     id, req.user.id, type, origine, duree, visibilite,
     media_url      || null,
     texte          || null,
     event_title    || null,
     event_date     || null,
+    event_lieu     || null,
     event_tags     ? JSON.stringify(event_tags) : null,
     clip_duree_seconds || null,
+    // Ville facultative : sert de pastille sur la carte du fil.
+    typeof ville === 'string' && ville.trim() ? ville.trim().slice(0, 80) : null,
     ts,
   ]);
 
   const post = await db.get(
-    `SELECT p.*, u.name AS author_name, u.country AS author_country
+    `SELECT p.*, u.name AS author_name, u.country AS author_country,
+            u.avatar AS author_avatar, u.phone AS author_phone,
+            0 AS liked
      FROM posts p JOIN users u ON u.id = p.user_id WHERE p.id = ?`,
     [id]);
   res.status(201).json({ post });
@@ -135,8 +152,12 @@ r.post('/posts', requireAuth, ah(async (req, res) => {
 // ─── POST /api/feed/stories ───────────────────────────────────────────────────
 // Publier une story (expire automatiquement après 24 h).
 r.post('/stories', requireAuth, ah(async (req, res) => {
-  const { media_url } = req.body;
-  if (!media_url) return res.status(400).json({ error: 'media_url requis' });
+  const { media_url, texte } = req.body;
+  // Un statut peut être une photo/vidéo… ou simplement un texte (le modèle de
+  // l'app prévoit `texte`), mais pas les deux à la fois vides.
+  const textePropre = typeof texte === 'string' && texte.trim() ? texte.trim().slice(0, 300) : null;
+  if (!media_url && !textePropre)
+    return res.status(400).json({ error: 'media_url ou texte requis' });
 
   const id = uid('st');
   const ts = now();
@@ -144,8 +165,8 @@ r.post('/stories', requireAuth, ah(async (req, res) => {
   // La table stories n'a pas de colonne expires_at : la péremption à 24 h est
   // calculée à la lecture (WHERE created_at >= cutoff).
   await db.run(
-    'INSERT INTO stories (id, user_id, media_url, created_at) VALUES (?, ?, ?, ?)',
-    [id, req.user.id, media_url, ts],
+    'INSERT INTO stories (id, user_id, media_url, texte, created_at) VALUES (?, ?, ?, ?, ?)',
+    [id, req.user.id, media_url || null, textePropre, ts],
   );
 
   const story = await db.get('SELECT * FROM stories WHERE id = ?', [id]);
