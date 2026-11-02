@@ -83,8 +83,9 @@ r.post('/send', requireAuth, limitSend, ah(async (req, res) => {
   });
   try {
     const push = require('../services/push');
-    if (push.enabled() && toUser.fcm_token) {
-      push.sendInfoPush(toUser.fcm_token,
+    const token = toUser.fcm_token || await push.primaryToken(toUser.id);
+    if (push.enabled() && token) {
+      push.sendInfoPush(token,
         req.user.name || req.user.phone,
         `Note vocale · ${Math.floor(dur / 60)}:${String(dur % 60).padStart(2, '0')}`, {
           kind: 'message', from_phone: req.user.phone,

@@ -74,15 +74,33 @@ function sendTo(phone, obj) {
 }
 
 async function getUser(phone) {
-  return db.get(
+  const u = await db.get(
     `SELECT id, name, fcm_token FROM users WHERE phone = ? AND status = 'active'`,
     [phone]);
+  if (!u) return null;
+  // 📱 Le jeton vit dans device_tokens (POST /api/auth/fcm-token) : l'ancienne
+  // colonne users.fcm_token n'est plus alimentée par l'app.
+  if (!u.fcm_token) u.fcm_token = await push.primaryToken(u.id);
+  return u;
 }
 
 /** L'utilisateur est-il connecté au canal temps réel ? */
 function isOnline(phone) {
   const p = normalizePhone(phone);
   return !!(p && online.has(p));
+}
+
+/**
+ * L'application est-elle au PREMIER PLAN ?
+ * L'app annonce son état juste après la connexion (message `presence`).
+ * Sert à décider s'il faut doubler le message temps réel par un push :
+ * inutile de réveiller un téléphone dont l'écran est déjà ouvert.
+ */
+function isForeground(phone) {
+  const p = normalizePhone(phone);
+  if (!p) return false;
+  const e = online.get(p);
+  return !!(e && e.ws && e.ws.readyState === WebSocket.OPEN && e.fg);
 }
 
 /* 🛡️ Anti-abus : chaque offre déclenche un push chez l'appelé */
@@ -241,6 +259,62 @@ function declineCall(phone, callId) {
 function notifyMessage(toPhone, payload) {
   const p = normalizePhone(toPhone);
   return p ? sendTo(p, { type: 'msg', ...payload }) : false;
+}
+
+/**
+ * ☎️ Clôture d'un appel depuis un module HTTP (annulation depuis
+ * /calls/:id/cancel, refus depuis /rtc/decline) : l'autre partie est
+ * prévenue en temps réel et, si son app n'est pas au premier plan, par push.
+ * → true si un destinataire a été trouvé et notifié.
+ */
+async function endCall(callId, reason = 'cancel') {
+  const id = String(callId || '');
+  if (!id) return false;
+
+  const live = calls.get(id);
+  if (live) finish(live); // l'état en mémoire ne doit pas rester « sonne »
+
+  const row = await db.get('SELECT user_id, callee_user_id FROM calls WHERE id = ?', [id])
+    .catch(() => null);
+  const declined = reason === 'declined' || reason === 'busy';
+
+  const callerId = (row && row.user_id) || null;
+  const calleeId = (row && row.callee_user_id) || null;
+  const caller = await phoneOf(callerId, live && live.caller);
+  const callee = await phoneOf(calleeId, live && live.callee);
+
+  const targetId = declined ? callerId : calleeId;
+  const target = declined ? caller : callee;
+  if (!target) return false;
+
+  const from = (declined ? callee : caller) || '';
+  sendTo(target, {
+    type: declined ? 'reject' : 'hangup',
+    call_id: id,
+    from,
+    reason,
+  });
+
+  if (!isForeground(target) && targetId) {
+    await push.sendUser(targetId, {
+      data: { kind: 'call_cancel', call_id: id, from_phone: from, reason },
+      title: declined ? 'Appel refusé' : 'Appel terminé',
+      body: declined ? 'Ton appel a été refusé' : 'L’appel est terminé',
+      channel: 'calls',
+      collapseKey: `call-${id}`,
+    }).catch(() => {});
+  }
+
+  log(`☎️ Appel clos (${reason}) : ${id}`);
+  return true;
+}
+
+/** Téléphone d'un utilisateur (ou valeur de repli si déjà connue). */
+async function phoneOf(userId, fallback) {
+  if (fallback) return fallback;
+  if (!userId) return null;
+  const u = await db.get('SELECT phone FROM users WHERE id = ?', [userId]).catch(() => null);
+  return u ? u.phone : null;
 }
 
 /* ───────────── Relais générique (appels inconnus du standardiste) ───────────── */
@@ -619,9 +693,9 @@ function init(server) {
             }
           }
           // Notifier par push si le watcher est hors ligne
-          db.get('SELECT fcm_token FROM users WHERE id = ?', [watcherId]).then(w => {
-            if (w && w.fcm_token) {
-              push.sendData(w.fcm_token, {
+          push.primaryToken(watcherId).then(token => {
+            if (token) {
+              push.sendData(token, {
                 kind: 'contact_online',
                 from_phone: user.phone,
                 from_name: user.name || '',
@@ -712,4 +786,10 @@ async function getPresence(phones) {
   return result;
 }
 
-module.exports = { init, isOnline, ackCall, declineCall, notifyMessage, getPresence, presenceWatches, _debug };
+module.exports = {
+  init, isOnline, isForeground,
+  /** Envoyer un message à un utilisateur connecté (depuis un autre module) */
+  sendTo,
+  ackCall, declineCall, endCall,
+  notifyMessage, getPresence, presenceWatches, _debug,
+};

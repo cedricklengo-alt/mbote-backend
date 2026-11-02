@@ -85,8 +85,9 @@ async function runScheduler() {
 
     for (const row of due) {
       // Notifier l'initiateur
-      if (row.fcm_token) {
-        await push.sendData(row.fcm_token, {
+      const token = row.fcm_token || await push.primaryToken(row.user_id);
+      if (token) {
+        await push.sendData(token, {
           kind:         'dial_later_reminder',
           dial_id:      row.id,
           target_phone: row.target_phone,

@@ -45,13 +45,16 @@ r.post('/request-otp', limitOtpAsk, ah(async (req, res) => {
     [phone, code, expires, code, expires]
   );
 
-  if (sms.enabled()) {
-    const result = await sms.sendSms(phone, `MboteCall : ton code est ${code}. Valable 5 min. Ne le partage jamais.`);
-    if (!result.ok) return res.status(502).json({ error: 'SMS non envoyé — vérifie le numéro et réessaie' });
-  }
+  // 🧪 DEMO_MODE : on n'envoie AUCUN SMS réel. Sans ce court-circuit, un
+  // crédit SMS épuisé (ou un sender refusé) renvoyait 502 à tout le monde et
+  // bloquait la connexion — même en démonstration.
   if (DEMO()) {
     console.log(`📲 [DEMO] OTP pour ${phone} : ${code}`);
     return res.json({ sent: true, demo_code: code });
+  }
+  if (sms.enabled()) {
+    const result = await sms.sendSms(phone, `MboteCall : ton code est ${code}. Valable 5 min. Ne le partage jamais.`);
+    if (!result.ok) return res.status(502).json({ error: 'SMS non envoyé — vérifie le numéro et réessaie' });
   }
   res.json({ sent: true });
 }));
