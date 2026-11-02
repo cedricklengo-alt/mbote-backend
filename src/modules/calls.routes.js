@@ -249,10 +249,17 @@ r.post('/log-incoming', requireAuth, ah(async (req, res) => {
 /* ---------- 4) Historique ---------- */
 r.get('/history', requireAuth, ah(async (req, res) => {
   const rows = await db.all(
+    // `direction` est la colonne écrite à la création de l'appel : elle est la
+    // seule à distinguer un appel REÇU d'un appel passé (un appel entrant
+    // enregistré par /log-incoming porte user_id = destinataire).
+    // `answered_at` permet de savoir si l'appel a été décroché : sans lui,
+    // un appel entrant décroché passait pour « manqué ».
     `SELECT c.id,
             CASE WHEN c.user_id = ? THEN c.callee ELSE COALESCE(u.phone, c.callee) END AS callee,
-            CASE WHEN c.user_id = ? THEN 'outgoing' ELSE 'incoming' END AS direction,
-            c.destination, c.status, c.started_at, c.billed_sec, c.cost_cents, c.hangup_cause
+            COALESCE(c.direction, CASE WHEN c.user_id = ? THEN 'outgoing' ELSE 'incoming' END) AS direction,
+            c.destination, c.status, c.started_at, c.answered_at, c.ended_at,
+            c.billed_sec, c.cost_cents, c.hangup_cause,
+            COALESCE(c.with_video, 0) AS with_video, c.rtc_mode
      FROM calls c LEFT JOIN users u ON u.id = c.user_id
      WHERE c.user_id = ? OR c.callee_user_id = ?
      ORDER BY c.started_at DESC LIMIT 100`, [req.user.id, req.user.id, req.user.id, req.user.id]);
