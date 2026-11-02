@@ -327,6 +327,9 @@ function forward(user, type, msg, to) {
     ...(msg.reason ? { reason: String(msg.reason).slice(0, 30) } : {}),
     ...(type === 'offer' ? {
       from_name: user.name || '', from_avatar: user.avatar || null, sdp: msg.sdp,
+      // 📹 Le mode vidéo doit suivre l'offre : sans ce drapeau, l'appelé ne
+      // saurait pas qu'il reçoit un appel vidéo et ouvrirait sa caméra… ou pas.
+      video: msg.video === true,
     } : {}),
     ...((type === 'answer' || type === 'reoffer' || type === 'reanswer') ? { sdp: msg.sdp } : {}),
     ...(type === 'ice' ? { candidate: msg.candidate } : {}),
@@ -364,6 +367,7 @@ async function onOffer(ws, user, msg, to) {
     offerMsg: {
       type: 'offer', call_id: callId, from: user.phone,
       from_name: user.name || '', from_avatar: user.avatar || null, sdp: msg.sdp,
+      video: msg.video === true, // 📹 conservé pour l'appelé réveillé par push
     },
     ice: [], ringAck: false, pushSent: false, fallbackSent: false, delivered: false,
     ghostTimer: null, wakeTimer: null, ttlTimer: null,
@@ -442,7 +446,11 @@ async function onMessage(ws, user, raw) {
 
     // Salle absente → l'émetteur la crée et en devient l'hôte
     if (!g) {
-      g = { members: new Map(), invited: new Set(), host: user.phone, createdAt: Date.now() };
+      g = { members: new Map(), invited: new Set(), host: user.phone, createdAt: Date.now(),
+            // 📹 mode de la salle : un invité rejoint en audio OU en vidéo,
+            // l'invitation doit le lui dire (sinon il ouvrirait la caméra
+            // d'un appel qui n'en veut pas, ou l'inverse).
+            video: msg.video === true };
       groupCalls.set(gId, g);
     }
 
@@ -514,6 +522,7 @@ async function onMessage(ws, user, raw) {
     if (toEntry) {
       send(toEntry.ws, {
         ...msg, from: user.phone, from_name: user.name,
+        video: msg.video === true || g.video === true,
         peers: [...g.members.keys()],
       });
     } else {

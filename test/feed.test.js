@@ -37,7 +37,10 @@ async function login(phone, name) {
   const srv = spawn('node', ['src/server.js'], {
     cwd: path.join(__dirname, '..'),
     env: { ...process.env, PORT: String(PORT), JWT_SECRET: 'test-feed', DEMO_MODE: 'true',
-           PUSH_DEBUG_FAKE: 'true', DATABASE_URL: '', MBOTE_MESSAGE_STORAGE: '/tmp/feed-test-storage' },
+           PUSH_DEBUG_FAKE: 'true', DATABASE_URL: '', MBOTE_MESSAGE_STORAGE: '/tmp/feed-test-storage',
+           // Sans cela le `.env` du dépôt fait pointer les URL de médias vers
+           // la production et les vérifications de fichiers échouent.
+           PUBLIC_URL: `http://127.0.0.1:${PORT}` },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   let srvOut = '';
@@ -193,6 +196,51 @@ async function login(phone, name) {
     ok('fil sans jeton → 401', anonyme.status === 401, anonyme.status);
     const likeInexistant = await call('POST', '/feed/posts/inexistant/like', { token: A.token });
     ok('like sur post inconnu → 404', likeInexistant.status === 404, likeInexistant.status);
+
+    console.log('\n11. Suppression (auteur uniquement)');
+    // Auteur : OK, et le post disparaît du fil immédiatement
+    const aSupprimer = await call('POST', '/feed/posts', {
+      token: Bc.token, body: { type: 'texte', texte: 'À supprimer', visibilite: 'public' } });
+    const idSupp = aSupprimer.data.post.id;
+    await call('POST', `/feed/posts/${idSupp}/like`, { token: A.token });
+    await call('POST', `/feed/posts/${idSupp}/comments`, { token: A.token, body: { texte: 'dommage' } });
+
+    const parAutrui = await call('DELETE', `/feed/posts/${idSupp}`, { token: A.token });
+    ok('suppression par un autre → 403', parAutrui.status === 403, parAutrui);
+
+    const parAuteur = await call('DELETE', `/feed/posts/${idSupp}`, { token: Bc.token });
+    ok('suppression par l’auteur → 200', parAuteur.status === 200 && parAuteur.data.deleted_id === idSupp, parAuteur);
+    const feedApresSupp = await call('GET', '/feed', { token: A.token });
+    ok('post supprimé absent du fil', !feedApresSupp.data.posts.some(p => p.id === idSupp));
+    const reSupp = await call('DELETE', `/feed/posts/${idSupp}`, { token: Bc.token });
+    ok('supprimer deux fois → 404', reSupp.status === 404, reSupp.status);
+    const inconnu = await call('DELETE', '/feed/posts/po_inexistant', { token: Bc.token });
+    ok('post inconnu → 404', inconnu.status === 404, inconnu.status);
+
+    // Statuts : auteur seulement
+    const stASupp = await call('POST', '/feed/stories', { token: Bc.token, body: { texte: 'statut à jeter' } });
+    const stId = stASupp.data.story.id;
+    const stAutrui = await call('DELETE', `/feed/stories/${stId}`, { token: A.token });
+    ok('statut supprimé par un autre → 403', stAutrui.status === 403, stAutrui.status);
+    const stAuteur = await call('DELETE', `/feed/stories/${stId}`, { token: Bc.token });
+    ok('statut supprimé par l’auteur → 200', stAuteur.status === 200, stAuteur);
+    const stsApres = await call('GET', '/feed/stories', { token: Bc.token });
+    ok('statut supprimé absent de la bande', !(stsApres.data.stories || []).some(s => s.id === stId));
+
+    // Le fichier envoyé ne reste pas orphelin sur le disque
+    const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==', 'base64');
+    const form = new FormData();
+    form.append('file', new Blob([png], { type: 'image/png' }), 'test.png');
+    const up = await fetch(`${B}/upload`, { method: 'POST', headers: { Authorization: `Bearer ${Bc.token}` }, body: form });
+    const upJson = await up.json();
+    const photo = await call('POST', '/feed/posts', {
+      token: Bc.token, body: { type: 'photo', media_url: upJson.url, visibilite: 'public' } });
+    const fichierAvant = await fetch(upJson.url);
+    ok('photo publiée et servie', fichierAvant.status === 200, fichierAvant.status);
+    await call('DELETE', `/feed/posts/${photo.data.post.id}`, { token: Bc.token });
+    const fichierApres = await fetch(upJson.url);
+    ok('fichier du post supprimé retiré du disque', fichierApres.status === 404, fichierApres.status);
+
   } catch (e) {
     console.error('\n💥 exception du test :', e.message);
     fail++;

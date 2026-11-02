@@ -3,7 +3,28 @@
 const express  = require('express');
 const db       = require('../db');
 const { requireAuth } = require('../middleware/auth');
+const path     = require('path');
+const fs       = require('fs');
 const { uid, now, ah } = require('../util');
+
+
+/**
+ * 🧹 Supprime le fichier d'un média quand sa publication disparaît.
+ * Ne touche qu'aux fichiers servis par CE serveur (`/uploads/…`) : une URL
+ * externe (Cloudinary, autre CDN) n'est jamais effacée.
+ */
+async function removeUploadedFile(mediaUrl) {
+  try {
+    if (!mediaUrl || typeof mediaUrl !== 'string') return;
+    const marker = '/uploads/';
+    const i = mediaUrl.indexOf(marker);
+    if (i === -1) return;
+    const name = path.basename(mediaUrl.slice(i + marker.length).split('?')[0]);
+    if (!name || name.includes('..')) return;
+    const file = path.join(__dirname, '..', '..', 'uploads', name);
+    await fs.promises.unlink(file).catch(() => {});
+  } catch { /* le fichier est peut-être déjà parti : sans gravité */ }
+}
 
 const r = express.Router();
 
@@ -268,6 +289,45 @@ r.post('/posts/:id/comments', requireAuth, ah(async (req, res) => {
   `, [cmId]);
 
   res.status(201).json({ comment });
+}));
+
+// ─── DELETE /api/feed/posts/:id ───────────────────────────────────────────────
+// Seul l'auteur peut supprimer sa publication. Les j'aime et commentaires
+// associés partent avec (sinon la table grossit sans fin).
+r.delete('/posts/:id', requireAuth, ah(async (req, res) => {
+  const post = await db.get('SELECT id, user_id, media_url FROM posts WHERE id = ?', [req.params.id]);
+  if (!post) return res.status(404).json({ error: 'Publication introuvable' });
+  if (post.user_id !== req.user.id)
+    return res.status(403).json({ error: 'Tu ne peux supprimer que tes publications' });
+
+  await db.tx(async (tx) => {
+    await tx.run('DELETE FROM post_likes    WHERE post_id = ?', [post.id]);
+    await tx.run('DELETE FROM post_comments WHERE post_id = ?', [post.id]);
+    await tx.run('DELETE FROM posts         WHERE id      = ?', [post.id]);
+  });
+
+  // 🧹 Le fichier envoyé (photo/vidéo) ne doit pas rester orphelin sur le disque.
+  await removeUploadedFile(post.media_url);
+
+  res.json({ ok: true, deleted_id: post.id });
+}));
+
+// ─── DELETE /api/feed/stories/:id ─────────────────────────────────────────────
+// Seul l'auteur peut supprimer son statut.
+r.delete('/stories/:id', requireAuth, ah(async (req, res) => {
+  const story = await db.get('SELECT id, user_id, media_url FROM stories WHERE id = ?', [req.params.id]);
+  if (!story) return res.status(404).json({ error: 'Statut introuvable' });
+  if (story.user_id !== req.user.id)
+    return res.status(403).json({ error: 'Tu ne peux supprimer que tes statuts' });
+
+  await db.tx(async (tx) => {
+    await tx.run('DELETE FROM stories_seen WHERE story_id = ?', [story.id]);
+    await tx.run('DELETE FROM stories      WHERE id       = ?', [story.id]);
+  });
+
+  await removeUploadedFile(story.media_url);
+
+  res.json({ ok: true, deleted_id: story.id });
 }));
 
 module.exports = r;
