@@ -107,8 +107,10 @@ app.get('/api/health', (req, res) => res.json({
 
 /* ---- Gestion d'erreurs ---- */
 app.use((err, req, res, next) => {
-  console.error('💥', err);
-  res.status(500).json({ error: 'Erreur interne' });
+  const status = err.status || err.statusCode || 500;
+  const msg    = err.expose ? err.message : 'Erreur interne';
+  console.error(`💥 ${req.method} ${req.path} → ${status}`, err.stack || err.message || err);
+  res.status(status).json({ error: msg });
 });
 
 const PORT = process.env.PORT || 4000;

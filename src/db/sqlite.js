@@ -375,6 +375,39 @@ const MIGRATIONS = [
      expires_at   INTEGER NOT NULL,
      used_at      INTEGER
   )`,
+  // ── v3.5 MESSAGES UNIFIÉS — messagerie bi-directionnelle moderne ──
+  `CREATE TABLE IF NOT EXISTS messages (
+     id           TEXT PRIMARY KEY,
+     sender_id    TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+     recipient_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+     client_id    TEXT,
+     kind         TEXT NOT NULL DEFAULT 'text',
+     body         TEXT NOT NULL DEFAULT '',
+     lang_from    TEXT NOT NULL DEFAULT 'fr',
+     lang_to      TEXT NOT NULL DEFAULT 'fr',
+     translation  TEXT NOT NULL DEFAULT '',
+     transcript   TEXT NOT NULL DEFAULT '',
+     media_path   TEXT,
+     media_name   TEXT,
+     media_mime   TEXT,
+     media_size   INTEGER,
+     duration_sec INTEGER,
+     wave         TEXT,
+     created_at   INTEGER NOT NULL,
+     delivered_at INTEGER,
+     read_at      INTEGER,
+     played_at    INTEGER,
+     deleted_at   INTEGER,
+     UNIQUE (sender_id, client_id)
+  )`,
+  `CREATE TABLE IF NOT EXISTS message_hidden (
+     message_id  TEXT NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+     user_id     TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+     hidden_at   INTEGER NOT NULL,
+     PRIMARY KEY (message_id, user_id)
+  )`,
+  `CREATE INDEX IF NOT EXISTS idx_messages_sender    ON messages(sender_id, created_at DESC)`,
+  `CREATE INDEX IF NOT EXISTS idx_messages_recipient ON messages(recipient_id, created_at DESC)`,
 ];
 
 let db;

@@ -349,6 +349,41 @@ CREATE TABLE IF NOT EXISTS invite_tokens (
 ALTER TABLE users ADD COLUMN IF NOT EXISTS last_seen_at BIGINT;
 ALTER TABLE calls ADD COLUMN IF NOT EXISTS user_plan_id TEXT;
 
+
+-- v3.4 MESSAGES — messagerie unifiée (remplace text_messages + voice_notes pour les échanges bi-directs)
+CREATE TABLE IF NOT EXISTS messages (
+  id           TEXT PRIMARY KEY,
+  sender_id    TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  recipient_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  client_id    TEXT,
+  kind         TEXT NOT NULL DEFAULT 'text',
+  body         TEXT NOT NULL DEFAULT '',
+  lang_from    TEXT NOT NULL DEFAULT 'fr',
+  lang_to      TEXT NOT NULL DEFAULT 'fr',
+  translation  TEXT NOT NULL DEFAULT '',
+  transcript   TEXT NOT NULL DEFAULT '',
+  media_path   TEXT,
+  media_name   TEXT,
+  media_mime   TEXT,
+  media_size   INTEGER,
+  duration_sec INTEGER,
+  wave         TEXT,
+  created_at   BIGINT NOT NULL,
+  delivered_at BIGINT,
+  read_at      BIGINT,
+  played_at    BIGINT,
+  deleted_at   BIGINT,
+  UNIQUE (sender_id, client_id)
+);
+CREATE TABLE IF NOT EXISTS message_hidden (
+  message_id  TEXT NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+  user_id     TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  hidden_at   BIGINT NOT NULL,
+  PRIMARY KEY (message_id, user_id)
+);
+CREATE INDEX IF NOT EXISTS idx_messages_sender    ON messages(sender_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_messages_recipient ON messages(recipient_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_messages_client    ON messages(sender_id, client_id) WHERE client_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_watches_target    ON watches(target_phone);
 CREATE INDEX IF NOT EXISTS idx_dial_later_user   ON dial_later(user_id, cancelled);
 CREATE INDEX IF NOT EXISTS idx_shop_orders_user  ON shop_orders(user_id);

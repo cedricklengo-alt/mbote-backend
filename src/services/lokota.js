@@ -335,19 +335,22 @@ async function processNote(id) {
  * sans l'étape Whisper : plus simple, plus fiable, quasi gratuit).
  */
 async function processMessage(id) {
-  const msg = await db.get('SELECT * FROM text_messages WHERE id = ?', [id]);
-  if (!msg || msg.status !== 'pending') return;
+  const msg = await db.get('SELECT * FROM messages WHERE id = ? AND kind = \'text\'', [id]);
+  if (!msg) return;
+  // les messages n'ont pas de colonne status : on traduit si la translation est vide
+  if (msg.translation) return; // déjà traduit
   const m = mode();
 
   if (m === 'off') {
-    await db.run(`UPDATE text_messages SET status = 'no_ai' WHERE id = ?`, [id]);
+    // messages n'a pas de colonne status, on laisse translation vide (= 'off')
+    return;
     return;
   }
 
   if (m === 'demo') {
     await new Promise((r) => setTimeout(r, 1200));
     await db.run(
-      `UPDATE text_messages SET translation = ?, status = 'done' WHERE id = ?`,
+      `UPDATE messages SET translation = ? WHERE id = ?`,
       [`(démo) Traduction simulée en ${LANGS[msg.lang_to] || msg.lang_to} — la vraie IA s'active avec une clé (voir guide).`, id]);
     console.log(`💬 [MESSAGES] ${id} traduit (simulation)`);
     return;
@@ -371,7 +374,7 @@ async function processMessage(id) {
     if (!cc.ok) throw new Error(`traduction HTTP ${cc.status}`);
     const translation = (await cc.json()).choices?.[0]?.message?.content?.trim() || '';
     await db.run(
-      `UPDATE text_messages SET translation = ?, status = 'done' WHERE id = ?`,
+      `UPDATE messages SET translation = ? WHERE id = ?`,
       [translation, id]);
     console.log(`💬 [MESSAGES] ${id} traduit (${msg.lang_from} → ${msg.lang_to})`);
   } catch (e) {

@@ -8,6 +8,8 @@ const { uid, now, normalizePhone, ah } = require('../util');
 const { requireAuth } = require('../middleware/auth');
 const rtcWs = require('./rtc.ws');
 const push = require('../services/push');
+const lokotatr = require('../services/lokota');
+
 
 const router = express.Router();
 const lokota = express.Router();
@@ -126,7 +128,13 @@ async function sendText(req, res) {
   const langFrom = String(req.body.lang_from || 'fr').slice(0, 12);
   const langTo = String(req.body.lang_to || 'fr').slice(0, 12);
   const result = await insertMessage({ sender: req.user, peer, body: text, clientId: clientId || null, langFrom, langTo });
-  if (!result.duplicate) await notifyRecipient(result.row, req.user, peer);
+  if (!result.duplicate) {
+    await notifyRecipient(result.row, req.user, peer);
+    // Traduction Lokota (tâche de fond) — uniquement si lang_from ≠ lang_to
+    if (langFrom !== langTo && !result.duplicate) {
+      setImmediate(() => lokotatr.processMessage(result.row.id).catch(() => {}));
+    }
+  }
   res.status(result.duplicate ? 200 : 201).json({ ...forClient(result.row, req.user.id), id: result.row.id });
 }
 
