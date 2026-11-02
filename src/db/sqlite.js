@@ -408,6 +408,41 @@ const MIGRATIONS = [
   )`,
   `CREATE INDEX IF NOT EXISTS idx_messages_sender    ON messages(sender_id, created_at DESC)`,
   `CREATE INDEX IF NOT EXISTS idx_messages_recipient ON messages(recipient_id, created_at DESC)`,
+  // ── v3.5 TOKENS APPAREILS (FCM / push notifications) ──
+  `CREATE TABLE IF NOT EXISTS device_tokens (
+     token      TEXT PRIMARY KEY,
+     user_id    TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+     updated_at INTEGER NOT NULL
+  )`,
+  `CREATE INDEX IF NOT EXISTS idx_device_tokens_user ON device_tokens(user_id)`,
+
+  // ── v3.5 RAPPELS DE PRÉSENCE ──
+  `CREATE TABLE IF NOT EXISTS presence_reminders (
+     owner_id    TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+     target_id   TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+     created_at  INTEGER NOT NULL,
+     notified_at INTEGER,
+     PRIMARY KEY (owner_id, target_id)
+  )`,
+
+  // ── v3.5 COLONNES UTILISATEURS — visibilité présence & notifications ──
+  `ALTER TABLE users ADD COLUMN presence_visible      INTEGER DEFAULT 1`,
+  `ALTER TABLE users ADD COLUMN notifications_enabled INTEGER DEFAULT 1`,
+
+  // ── v3.5 COLONNES APPELS — appelé, mode RTC, vidéo ──
+  `ALTER TABLE calls ADD COLUMN callee_user_id TEXT`,
+  `ALTER TABLE calls ADD COLUMN rtc_mode       INTEGER DEFAULT 0`,
+  `ALTER TABLE calls ADD COLUMN with_video     INTEGER DEFAULT 0`,
+  // ── v3.5 CADEAUX EN ATTENTE ──
+  `CREATE TABLE IF NOT EXISTS pending_gifts (
+     order_id        TEXT PRIMARY KEY REFERENCES shop_orders(id) ON DELETE CASCADE,
+     recipient_phone TEXT NOT NULL,
+     recipient_name  TEXT,
+     user_id         TEXT REFERENCES users(id) ON DELETE SET NULL,
+     created_at      INTEGER NOT NULL,
+     claimed_at      INTEGER
+  )`,
+  `CREATE INDEX IF NOT EXISTS idx_pending_gifts_phone ON pending_gifts(recipient_phone)`,
 ];
 
 let db;

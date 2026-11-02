@@ -392,6 +392,43 @@ CREATE INDEX IF NOT EXISTS idx_posts_created   ON posts(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_posts_user      ON posts(user_id);
 CREATE INDEX IF NOT EXISTS idx_stories_user    ON stories(user_id);
 CREATE INDEX IF NOT EXISTS idx_stories_created ON stories(created_at DESC);
+
+-- ── v3.5 TOKENS APPAREILS (FCM / push notifications) ─────────────────────
+CREATE TABLE IF NOT EXISTS device_tokens (
+  token      TEXT PRIMARY KEY,
+  user_id    TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  updated_at BIGINT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_device_tokens_user ON device_tokens(user_id);
+
+-- ── v3.5 RAPPELS DE PRÉSENCE ─────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS presence_reminders (
+  owner_id    TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  target_id   TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  created_at  BIGINT NOT NULL,
+  notified_at BIGINT,
+  PRIMARY KEY (owner_id, target_id)
+);
+
+-- ── v3.5 COLONNES UTILISATEURS — visibilité présence & notifications ──────
+ALTER TABLE users ADD COLUMN IF NOT EXISTS presence_visible      INTEGER DEFAULT 1;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS notifications_enabled INTEGER DEFAULT 1;
+
+-- ── v3.5 COLONNES APPELS — appelé, mode RTC, vidéo ───────────────────────
+ALTER TABLE calls ADD COLUMN IF NOT EXISTS callee_user_id TEXT;
+ALTER TABLE calls ADD COLUMN IF NOT EXISTS rtc_mode       INTEGER DEFAULT 0;
+ALTER TABLE calls ADD COLUMN IF NOT EXISTS with_video     INTEGER DEFAULT 0;
+
+-- ── v3.5 CADEAUX EN ATTENTE ─────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS pending_gifts (
+  order_id        TEXT PRIMARY KEY REFERENCES shop_orders(id) ON DELETE CASCADE,
+  recipient_phone TEXT NOT NULL,
+  recipient_name  TEXT,
+  user_id         TEXT REFERENCES users(id) ON DELETE SET NULL,
+  created_at      BIGINT NOT NULL,
+  claimed_at      BIGINT
+);
+CREATE INDEX IF NOT EXISTS idx_pending_gifts_phone ON pending_gifts(recipient_phone) WHERE claimed_at IS NULL;
 `;
 
 // Convertit les placeholders « ? » (style SQLite) en « $1, $2… » (style PG)
