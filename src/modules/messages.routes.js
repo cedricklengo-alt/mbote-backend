@@ -359,7 +359,8 @@ lokota.post('/send', requireAuth, ah(async (req, res) => {
       langFrom: String(req.body.lang_from || 'fr').slice(0, 12),
       langTo: String(req.body.lang_to || 'fr').slice(0, 12),
       duration: Math.max(1, Math.min(90, Number(req.body.duration_sec) || 1)),
-      wave,
+      // SQLite n'accepte que des valeurs simples : la forme d'onde part en JSON.
+      wave: wave && wave.length ? JSON.stringify(wave) : null,
       media: { path: storedPath, name: 'note.m4a', mime: 'audio/mp4', size: bytes.length },
     });
     if (result.duplicate) await fs.promises.unlink(storedPath).catch(() => {});
