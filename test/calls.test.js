@@ -209,6 +209,42 @@ function client(user) {
     const ligne2 = (histo2.data.calls || []).find(c => c.id === `grp_${gid}`);
     ok('durée conservée dans l’historique', ligne2 && ligne2.billed_sec === 73, ligne2 && ligne2.billed_sec);
 
+    console.log('\n7 bis. Historique : entrant, sortant, manqué, vidéo');
+    // Un appel REÇU et manqué : c'est le destinataire qui le journalise.
+    const missId = `in-${suffix}`;
+    const logMissed = await call('POST', '/calls/log-incoming', {
+      token: Bc.token, body: { from: A.phone, call_id: missId, cause: 'missed' },
+    });
+    ok('appel entrant manqué journalisé (200)', logMissed.status === 200, logMissed);
+    // Un appel REÇU et décroché (45 s).
+    const inId = `in2-${suffix}`;
+    const logIn = await call('POST', '/calls/log-incoming', {
+      token: Bc.token, body: { from: A.phone, call_id: inId, billed_sec: 45 },
+    });
+    ok('appel entrant décroché journalisé (200)', logIn.status === 200, logIn);
+    // Un appel PASSÉ en vidéo.
+    const vidOut = await call('POST', '/calls/start', {
+      token: A.token, body: { to: Bc.phone, with_video: true },
+    });
+    const outId = vidOut.data.call_id;
+
+    const hb = await call('GET', '/calls/history', { token: Bc.token });
+    const lMiss = (hb.data.calls || []).find(c => c.id === missId);
+    const lIn = (hb.data.calls || []).find(c => c.id === inId);
+    ok('appel manqué : présent dans la liste', !!lMiss, lMiss);
+    ok('appel manqué : direction « incoming »', lMiss && lMiss.direction === 'incoming', lMiss && lMiss.direction);
+    ok('appel manqué : jamais décroché (answered_at vide)', lMiss && !lMiss.answered_at, lMiss && lMiss.answered_at);
+    ok('appel manqué : motif conservé', lMiss && lMiss.hangup_cause === 'missed', lMiss && lMiss.hangup_cause);
+    ok('appel entrant décroché : direction « incoming »', lIn && lIn.direction === 'incoming', lIn && lIn.direction);
+    ok('appel entrant décroché : durée 45 s', lIn && lIn.billed_sec === 45, lIn && lIn.billed_sec);
+
+    const ha = await call('GET', '/calls/history', { token: A.token });
+    const lOut = (ha.data.calls || []).find(c => c.id === outId);
+    ok('appel passé : direction « outgoing »', lOut && lOut.direction === 'outgoing', lOut && lOut.direction);
+    ok('appel vidéo signalé (with_video = 1)', lOut && lOut.with_video === 1, lOut && lOut.with_video);
+    ok('l’appel passé n’apparaît pas comme entrant chez moi',
+       (ha.data.calls || []).every(c => c.id !== missId), 'aucune fuite');
+
     console.log('\n8. Garde-fous');
     // Un non-membre ne peut pas injecter d'offre dans la salle
     e.clear(); a.clear();
