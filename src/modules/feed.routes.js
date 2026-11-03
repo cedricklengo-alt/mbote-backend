@@ -39,6 +39,7 @@ const fs      = require('fs');
 const { uid, now, ah } = require('../util');
 const videoThumb = require('../services/video_thumb');
 const social    = require('../services/social');
+const notifs    = require('../services/notifs');
 const limites   = require('../services/limites');
 const texteSocial = require('../services/texte_social');
 const ia          = require('../services/ia_suggestions');
@@ -708,6 +709,40 @@ r.get('/analytique', requireAuth, ah(async (req, res) => {
     'SELECT COUNT(*) AS n FROM mentions WHERE user_id = ? AND created_at >= ?',
     [userId, now() - jour]);
 
+  // ── Engagement reçu : likes, commentaires, partages, taux et sommets ─────
+  // Tout est calculé sur MES publications. Le taux compare les interactions
+  // aux vues : sans vues (compteur à zéro), on se rabat sur le nombre
+  // d'interactions, jamais sur une division par zéro.
+  const totaux = await db.get(`
+    SELECT COUNT(*) AS publications,
+           COALESCE(SUM(COALESCE(likes,0)),0)    AS likes,
+           COALESCE(SUM(COALESCE(comments,0)),0) AS commentaires,
+           COALESCE(SUM(COALESCE(shares,0)),0)   AS partages,
+           COALESCE(SUM(COALESCE(vues,0)),0)     AS vues
+      FROM posts WHERE user_id = ?`, [userId]);
+
+  const likes = Number(totaux && totaux.likes) || 0;
+  const commentaires = Number(totaux && totaux.commentaires) || 0;
+  const partages = Number(totaux && totaux.partages) || 0;
+  const vues = Number(totaux && totaux.vues) || 0;
+  const interactions = likes + commentaires + partages;
+  const publications = Number(totaux && totaux.publications) || 0;
+
+  const tops = await db.all(`
+    SELECT id, texte, type, created_at, likes, comments, shares, vues,
+           (COALESCE(likes,0) + COALESCE(comments,0) * 2 + COALESCE(shares,0) * 3)
+             AS score
+      FROM posts
+     WHERE user_id = ?
+     ORDER BY score DESC, created_at DESC
+     LIMIT 5`, [userId]);
+
+  const mesNotifs = await db.get(
+    'SELECT COUNT(*) AS n FROM notifications WHERE user_id = ?', [userId]);
+  const mesNotifs24 = await db.get(
+    'SELECT COUNT(*) AS n FROM notifications WHERE user_id = ? AND created_at >= ?',
+    [userId, now() - jour]);
+
   res.json({
     hashtags_suivis: hashtags,
     hashtags_publies: mesTags.map((t) => ({
@@ -716,6 +751,31 @@ r.get('/analytique', requireAuth, ah(async (req, res) => {
     mentions: {
       recues: Number(recues && recues.n) || 0,
       recues_24h: Number(recues24 && recues24.n) || 0,
+    },
+    engagement: {
+      publications,
+      likes,
+      commentaires,
+      partages,
+      vues,
+      interactions,
+      likes_par_publication: publications ? Math.round((likes / publications) * 10) / 10 : 0,
+      // Pourcentage d'interactions par vue, arrondi au dixième.
+      taux: vues ? Math.round((interactions / vues) * 1000) / 10 : 0,
+      taux_base: vues ? 'vues' : 'interactions',
+      notifications: Number(mesNotifs && mesNotifs.n) || 0,
+      notifications_24h: Number(mesNotifs24 && mesNotifs24.n) || 0,
+      top: tops.map((t) => ({
+        id: t.id,
+        texte: (t.texte || '').slice(0, 120),
+        media_type: t.type || 'texte',
+        created_at: Number(t.created_at) || 0,
+        likes: Number(t.likes) || 0,
+        commentaires: Number(t.comments) || 0,
+        partages: Number(t.shares) || 0,
+        vues: Number(t.vues) || 0,
+        score: Number(t.score) || 0,
+      })),
     },
   });
 }));
@@ -1092,12 +1152,23 @@ r.get('/posts/:id/public', optionalAuth, ah(async (req, res) => {
 // Comptabilise un partage (lien copié ou envoi vers une autre application).
 r.post('/posts/:id/share', optionalAuth, ah(async (req, res) => {
   const post = await db.get(
-    'SELECT id, visibilite, shares FROM posts WHERE id = ?', [req.params.id]);
+    'SELECT id, user_id, visibilite, shares, texte FROM posts WHERE id = ?', [req.params.id]);
   if (!post || post.visibilite !== 'public')
     return res.status(404).json({ error: 'Publication introuvable ou privée' });
 
   await db.run('UPDATE posts SET shares = COALESCE(shares, 0) + 1 WHERE id = ?', [post.id]);
-  const relu = await db.get('SELECT shares FROM posts WHERE id = ?', [post.id]);
+  const relu = await db.get('SELECT shares, user_id, texte FROM posts WHERE id = ?', [post.id]);
+
+  // L'auteur est prévenu que sa publication circule (regroupé, comme les
+  // j'aime). Un visiteur non connecté ne peut pas être identifié : il compte
+  // dans le compteur, mais ne produit pas de notification nominative.
+  if (req.user && relu && String(relu.user_id) !== String(req.user.id)) {
+    await notifs.notifier({
+      receiverId: relu.user_id, senderId: req.user.id, senderNom: req.user.name,
+      type: notifs.TYPES.SHARE, postId: String(post.id),
+      sourceType: 'post', sourceId: String(post.id), texte: relu.texte,
+    }).catch(() => {});
+  }
 
   res.json({ partages: Number(relu && relu.shares) || 0, share_url: lienPublic(post.id) });
 }));
@@ -1175,7 +1246,7 @@ r.post('/posts/:id/view', requireAuth, ah(async (req, res) => {
 r.post('/posts/:id/like', requireAuth, ah(async (req, res) => {
   const { id }   = req.params;
   const userId   = req.user.id;
-  const post     = await db.get('SELECT id, likes FROM posts WHERE id = ?', [id]);
+  const post     = await db.get('SELECT id, user_id, likes, texte FROM posts WHERE id = ?', [id]);
   if (!post) return res.status(404).json({ error: 'Post introuvable' });
 
   const existing = await db.get(
@@ -1192,6 +1263,12 @@ r.post('/posts/:id/like', requireAuth, ah(async (req, res) => {
       await tx.run('DELETE FROM post_likes WHERE post_id = ? AND user_id = ?', [id, userId]);
       await tx.run(`UPDATE posts SET likes = ${G}(0, likes - 1) WHERE id = ?`, [id]);
     });
+    // Le retrait annule la notification : l'auteur ne doit jamais lire
+    // « X a aimé » alors que X n'aime plus.
+    await notifs.retirer({
+      receiverId: post.user_id, senderId: userId,
+      type: notifs.TYPES.LIKE, sourceId: String(id), sourceType: 'post',
+    }).catch(() => {});
     res.json({ liked: false, likes: Math.max(0, post.likes - 1) });
   } else {
     await db.tx(async (tx) => {
@@ -1202,6 +1279,13 @@ r.post('/posts/:id/like', requireAuth, ah(async (req, res) => {
       );
       await tx.run('UPDATE posts SET likes = likes + 1 WHERE id = ?', [id]);
     });
+    // Une notification par publication, quel que soit le nombre d'auteurs :
+    // c'est le regroupement « Patrick, Junior et 8 autres ».
+    await notifs.notifier({
+      receiverId: post.user_id, senderId: userId, senderNom: req.user.name,
+      type: notifs.TYPES.LIKE, postId: String(id), sourceType: 'post',
+      sourceId: String(id), texte: post.texte,
+    }).catch(() => {});
     res.json({ liked: true, likes: post.likes + 1 });
   }
 }));
@@ -1212,31 +1296,48 @@ r.get('/posts/:id/comments', requireAuth, ah(async (req, res) => {
   if (!post) return res.status(404).json({ error: 'Post introuvable' });
 
   const comments = await db.all(`
-    SELECT c.*, u.name AS author_name
+    SELECT c.*, u.name AS author_name, u.handle AS author_handle,
+           u.avatar AS author_avatar,
+           CASE WHEN c.user_id = ? THEN 1 ELSE 0 END AS a_moi
     FROM post_comments c
     JOIN users u ON u.id = c.user_id
     WHERE c.post_id = ?
     ORDER BY c.created_at ASC
-  `, [req.params.id]);
+  `, [req.user.id, req.params.id]);
 
-  res.json({ comments });
+  res.json({
+    comments: comments.map((c) => ({ ...c, reponses: [] })),
+  });
 }));
 
 // ─── POST /api/feed/posts/:id/comments ───────────────────────────────────────
 r.post('/posts/:id/comments', requireAuth, ah(async (req, res) => {
-  const { texte } = req.body;
+  const { texte, parent_id } = req.body;
   if (!texte || !texte.trim()) return res.status(400).json({ error: 'texte requis' });
 
-  const post = await db.get('SELECT id FROM posts WHERE id = ?', [req.params.id]);
+  const post = await db.get(
+    'SELECT id, user_id, texte FROM posts WHERE id = ?', [req.params.id]);
   if (!post) return res.status(404).json({ error: 'Post introuvable' });
+
+  // Réponse à un commentaire : le parent doit exister ET appartenir à CETTE
+  // publication. Sans cette vérification, on pourrait répondre à un
+  // commentaire d'une autre publication et notifier la mauvaise personne.
+  let parent = null;
+  if (parent_id) {
+    parent = await db.get(
+      'SELECT id, user_id, post_id FROM post_comments WHERE id = ?', [String(parent_id)]);
+    if (!parent || String(parent.post_id) !== String(req.params.id))
+      return res.status(400).json({ error: 'Commentaire parent introuvable' });
+  }
 
   const cmId = uid('cm');
   const ts   = now();
 
   await db.tx(async (tx) => {
     await tx.run(
-      'INSERT INTO post_comments (id, post_id, user_id, texte, created_at) VALUES (?, ?, ?, ?, ?)',
-      [cmId, req.params.id, req.user.id, texte.trim(), ts],
+      `INSERT INTO post_comments (id, post_id, user_id, texte, created_at, parent_id)
+       VALUES (?, ?, ?, ?, ?, ?)`,
+      [cmId, req.params.id, req.user.id, texte.trim(), ts, parent ? parent.id : null],
     );
     await tx.run(
       'UPDATE posts SET comments = comments + 1 WHERE id = ?',
@@ -1256,8 +1357,21 @@ r.post('/posts/:id/comments', requireAuth, ah(async (req, res) => {
     texteApercu: texte.trim(),
   }).catch(() => ({ mentions: [], notifies: 0, ignores: 0 }));
 
+  // Notifications : l'auteur de la publication (« a commenté ») et, pour une
+  // réponse, l'auteur du commentaire parent (« a répondu à votre commentaire »).
+  await notifs.notifierCommentaire({
+    postId: String(req.params.id),
+    commentId: cmId,
+    parentId: parent ? parent.id : null,
+    auteurPostId: post.user_id,
+    auteurParentId: parent ? parent.user_id : null,
+    senderId: req.user.id,
+    senderNom: req.user.name,
+    texte: texte.trim(),
+  }).catch(() => {});
+
   const comment = await db.get(`
-    SELECT c.*, u.name AS author_name
+    SELECT c.*, u.name AS author_name, u.handle AS author_handle, u.avatar AS author_avatar
     FROM post_comments c
     JOIN users u ON u.id = c.user_id
     WHERE c.id = ?
@@ -1283,6 +1397,12 @@ r.delete('/posts/:id', requireAuth, ah(async (req, res) => {
     await tx.run('DELETE FROM post_comments WHERE post_id = ?', [post.id]);
     await tx.run('DELETE FROM post_views    WHERE post_id = ?', [post.id]);
     await tx.run('DELETE FROM post_tags     WHERE post_id = ?', [post.id]);
+    // Les notifications qui pointent vers cette publication n'ont plus de
+    // destination : on les supprime plutôt que de laisser un lien mort.
+    await tx.run(`DELETE FROM notification_acteurs
+                   WHERE notification_id IN
+                     (SELECT id FROM notifications WHERE post_id = ?)`, [post.id]);
+    await tx.run('DELETE FROM notifications WHERE post_id = ?', [post.id]);
     await tx.run('DELETE FROM posts         WHERE id      = ?', [post.id]);
   });
 

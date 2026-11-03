@@ -554,6 +554,24 @@ CREATE TABLE IF NOT EXISTS notifications (
 );
 CREATE INDEX IF NOT EXISTS idx_notifications_user ON notifications(user_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_notifications_non_lues ON notifications(user_id, lu);
+-- v3.8 NOTIFICATIONS — regroupement des likes et partages, réponses aux
+-- commentaires.
+ALTER TABLE post_comments ADD COLUMN IF NOT EXISTS parent_id TEXT;
+CREATE INDEX IF NOT EXISTS idx_comments_parent ON post_comments(parent_id);
+
+/* Nombre d'auteurs distincts d'une notification groupée (« et 16 autres »).
+ * la table notification_acteurs porte le détail ; cette colonne évite de la
+ * compter à chaque affichage. */
+ALTER TABLE notifications ADD COLUMN IF NOT EXISTS nb_acteurs INTEGER NOT NULL DEFAULT 1;
+
+CREATE TABLE IF NOT EXISTS notification_acteurs (
+  notification_id TEXT NOT NULL,
+  user_id         TEXT NOT NULL,
+  created_at      BIGINT NOT NULL,
+  PRIMARY KEY (notification_id, user_id)
+);
+CREATE INDEX IF NOT EXISTS idx_notif_acteurs ON notification_acteurs(notification_id);
+
 `;
 
 

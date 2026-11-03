@@ -19,7 +19,7 @@
 const db = require('../db');
 const { uid, now } = require('../util');
 const limites = require('./limites');
-const push = require('./push');
+const notifs = require('./notifs');
 const {
   extraireHashtags, extraireMentions, normaliserHandle, handleDepuisNom,
 } = require('./texte_social');
@@ -162,44 +162,25 @@ async function notifierMention({
   cible, auteurId, auteurNom, sourceType, sourceId, postId, texte,
 }) {
   if (String(cible.id) === String(auteurId)) return false;
+  // Plafond propre aux mentions (plus strict que le plafond global) : une
+  // personne mentionnée vingt fois par heure ne doit pas être noyée.
   if (!limites.notifMentionAutorisee(cible.id)) return false;
 
-  const id = uid('no');
-  const extrait = (texte || '').toString().replace(/\s+/g, ' ').trim().slice(0, 140);
-  const corps = `${auteurNom || 'Quelqu’un'} t’a mentionné dans ${LIBELLE_SOURCE[sourceType] || 'un contenu'}`;
+  // Une seule fabrique de notifications pour toute l'application : le message,
+  // la poussée et les doublons sont gérés au même endroit (services/notifs).
+  const r = await notifs.notifier({
+    receiverId: cible.id,
+    senderId: auteurId,
+    senderNom: auteurNom,
+    type: notifs.TYPES.MENTION,
+    postId: postId || sourceId,
+    commentId: sourceType === 'comment' ? sourceId : null,
+    sourceType,
+    sourceId,
+    texte,
+  }).catch(() => ({ creee: false }));
 
-  try {
-    await db.run(
-      `INSERT INTO notifications
-         (id, user_id, sender_id, type, post_id, comment_id, source_type, source_id,
-          texte, lu, created_at)
-       VALUES (?, ?, ?, 'mention', ?, ?, ?, ?, ?, 0, ?)
-       ON CONFLICT (user_id, type, source_type, source_id) DO NOTHING`,
-      [id, cible.id, auteurId, postId || sourceId,
-        sourceType === 'comment' ? sourceId : null,
-        sourceType, sourceId, extrait, now()]);
-  } catch {
-    return false; // doublon : la notification existe déjà
-  }
-
-  // La poussée ne doit jamais faire échouer l'enregistrement du contenu.
-  try {
-    await push.sendUser(cible.id, {
-      title: 'Nouvelle mention',
-      body: corps,
-      channel: 'messages',
-      collapseKey: `mention-${postId || sourceId}`,
-      data: {
-        type: 'mention',
-        post_id: String(postId || sourceId),
-        source_type: sourceType,
-        source_id: String(sourceId),
-        from: String(auteurId || ''),
-      },
-    });
-  } catch { /* sans réseau, la notification reste dans l'application */ }
-
-  return true;
+  return !!r.creee;
 }
 
 /**

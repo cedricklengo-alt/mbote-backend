@@ -78,7 +78,10 @@ async function login(phone, name) {
     // ── 1. Identifiant public ───────────────────────────────────────────────
     console.log('1. Identifiant public (@pseudo)');
     ok('attribué à la connexion', !!cedrick.handle, cedrick.handle);
-    ok('dérivé du nom', cedrick.handle === 'cedricklengo', cedrick.handle);
+    // La base survit d'une exécution à l'autre : un suffixe numérique est
+    // normal quand « cedricklengo » est déjà pris. Ce qui compte, c'est que
+    // l'identifiant soit dérivé du nom, sans accent ni espace.
+    ok('dérivé du nom', /^cedricklengo\d*$/.test(cedrick.handle || ''), cedrick.handle);
     ok('unique : deux noms voisins ne se marchent pas dessus',
       patrick.handle !== junior.handle && patrick.handle !== cedrick.handle,
       [cedrick.handle, patrick.handle, junior.handle]);
@@ -158,7 +161,10 @@ async function login(phone, name) {
     ok('volume de publications joint',
       suggTag.data.tags.every((t) => typeof t.publications === 'number'), suggTag.data.tags[0]);
 
-    const suggMentions = await call('GET', `/feed/mentions/suggest?q=${patrick.handle.slice(0, 4)}`,
+    // Requête sur le pseudo COMPLET : la recherche travaille par préfixe, et
+    // la base de travail garde les comptes des exécutions précédentes
+    // (« patrickilunga2 », « patrickilunga3 »…) qui saturent la liste.
+    const suggMentions = await call('GET', `/feed/mentions/suggest?q=${patrick.handle}`,
       { token: junior.token });
     ok('personne proposée par identifiant',
       suggMentions.data.personnes.some((p) => p.handle === patrick.handle), suggMentions.data.personnes);
