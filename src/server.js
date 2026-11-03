@@ -219,6 +219,9 @@ db.init().then(() => {
     console.log(`   Base de données : ${db.name}`);
     console.log(`   Console admin   : http://localhost:${PORT}/admin`);
     console.log(`   Mode démo       : ${String(process.env.DEMO_MODE || 'true')}`);
+    // Sans relais TURN, un appel entre deux téléphones sur réseau mobile ne
+    // peut pas aboutir : autant le dire clairement dans les journaux.
+    console.log(`   ${require('./services/ice').startupNotice()}`);
   });
 }).catch((e) => {
   console.error('💥 Impossible d\'initialiser la base de données :', e);

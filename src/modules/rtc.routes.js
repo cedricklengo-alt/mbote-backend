@@ -5,11 +5,11 @@
  */
 
 const express = require('express');
-const crypto = require('crypto');
 const db = require('../db');
 const { requireAuth } = require('../middleware/auth');
 const { now, ah } = require('../util');
 const rtcWs = require('./rtc.ws');
+const { buildIceServers, turnConfigured } = require('../services/ice');
 
 const r = express.Router();
 
@@ -21,21 +21,12 @@ const r = express.Router();
  *   { urls: 'turn:turn.example.com', username: '…', credential: '…' }
  */
 r.get('/ice', requireAuth, (req, res) => {
-  const iceServers = [
-    { urls: 'stun:stun.l.google.com:19302' },
-    { urls: 'stun:stun1.l.google.com:19302' },
-    { urls: 'stun:stun.relay.metered.ca:80' },
-  ];
-  const urls = String(process.env.TURN_URLS || '').split(',').map((s) => s.trim()).filter(Boolean);
-  const secret = process.env.TURN_SHARED_SECRET;
-  if (urls.length && secret) {
-    // Coturn REST credentials: username expires after one hour.
-    const username = `${Math.floor(Date.now() / 1000) + 3600}:${req.user.id}`;
-    const credential = crypto.createHmac('sha1', secret).update(username).digest('base64');
-    iceServers.push({ urls, username, credential });
-  }
+  // Toute la logique est dans services/ice.js (testable sans serveur).
+  // `turn` permet à l'application de savoir si un relais existe : sans lui, un
+  // appel entre deux réseaux mobiles stricts ne peut pas aboutir.
   res.json({
-    iceServers,
+    iceServers: buildIceServers(req.user.id),
+    turn: turnConfigured(),
   });
 });
 
