@@ -168,6 +168,25 @@ function scoreInteret(post, maintenant) {
   return (engagement + bonus) / Math.pow(ageHeures + 2, 1.4);
 }
 
+/**
+ * Base publique du site (sans barre oblique finale).
+ * Sert à construire les liens de partage : `PUBLIC_URL` en production, sinon
+ * l'URL fournie par l'hébergeur, sinon rien (le lien est alors omis plutôt que
+ * faux — un mauvais lien partagé est pire qu'aucun lien).
+ */
+function basePublique() {
+  const brut = process.env.PUBLIC_URL
+    || process.env.RENDER_EXTERNAL_URL
+    || '';
+  return String(brut).replace(/\/$/, '');
+}
+
+/** Lien public de partage d'une publication, ou null si la base est inconnue. */
+function lienPublic(id) {
+  const base = basePublique();
+  return base ? `${base}/p/${id}` : null;
+}
+
 /** Trie par intérêt décroissant, sans modifier le tableau d'origine. */
 function trierParInteret(posts, maintenant) {
   return [...posts]
@@ -189,5 +208,7 @@ module.exports = {
   predicatNonExpire,
   scoreInteret,
   trierParInteret,
+  basePublique,
+  lienPublic,
   TAGS_PAR_POST,
 };

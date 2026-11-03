@@ -33,7 +33,7 @@
 
 const express = require('express');
 const db      = require('../db');
-const { requireAuth } = require('../middleware/auth');
+const { requireAuth, optionalAuth } = require('../middleware/auth');
 const path    = require('path');
 const fs      = require('fs');
 const { uid, now, ah } = require('../util');
@@ -41,6 +41,7 @@ const videoThumb = require('../services/video_thumb');
 const {
   canoniserVisibilite, canoniserDuree, extraireTags, normaliserTag,
   predicatVisibilite, predicatDecouverte, predicatNonExpire, trierParInteret,
+  lienPublic,
 } = require('../services/feed_rules');
 
 
@@ -131,6 +132,10 @@ async function enrichir(posts, userId) {
   return posts.map((p) => ({
     ...p,
     vues: Number(p.vues || 0),
+    // 🔗 Partage : l'application n'a pas à fabriquer le lien elle-même, sinon
+    // un changement de domaine laisserait des liens morts dans les conversations.
+    partages: Number(p.shares || 0),
+    share_url: lienPublic(p.id),
     tags: tagsParPost.get(p.id) || [],
     suivi: estSuivi.has(String(p.user_id)) ? 1 : 0,
     a_moi: String(p.user_id) === String(userId) ? 1 : 0,
@@ -571,6 +576,65 @@ r.post('/stories/:id/seen', requireAuth, ah(async (req, res) => {
     [req.params.id, req.user.id, now()],
   );
   res.json({ ok: true });
+}));
+
+// ─── GET /api/feed/posts/:id/public ─────────────────────────────────────────
+// Publication seule, SANS jeton obligatoire : c'est la route que consulte un
+// lien partagé (aperçu WhatsApp, page web). Avec un jeton valide, les règles
+// habituelles s'appliquent (contacts, communauté) ; sans jeton, seul le contenu
+// public est servi. Aucun numéro de téléphone n'est exposé.
+r.get('/posts/:id/public', optionalAuth, ah(async (req, res) => {
+  const id = String(req.params.id);
+
+  const sel = `SELECT p.*, u.name AS author_name, u.country AS author_country,
+                      u.avatar AS author_avatar,
+                      CASE WHEN p.user_id = ? THEN u.phone ELSE NULL END AS author_phone
+                 FROM posts p JOIN users u ON u.id = p.user_id
+                WHERE p.id = ?`;
+
+  let post = null;
+  if (req.user) {
+    const vis = predicatVisibilite(req.user.id, req.user.phone);
+    post = await db.get(`${sel} AND ${vis.sql}`,
+      [req.user.id, id, ...vis.params]);
+  } else {
+    // Visiteur non connecté : uniquement `public`. Ni contacts, ni communauté.
+    post = await db.get(`${sel} AND p.visibilite = 'public'`, ['', id]);
+  }
+  if (!post) return res.status(404).json({ error: 'Publication introuvable ou privée' });
+
+  const tags = await db.all('SELECT tag FROM post_tags WHERE post_id = ? ORDER BY tag', [id]);
+  const total = await db.get('SELECT COUNT(*) AS n FROM posts WHERE user_id = ?', [post.user_id]);
+
+  res.json({
+    post: {
+      ...post,
+      vues: Number(post.vues || 0),
+      partages: Number(post.shares || 0),
+      tags: tags.map((t) => t.tag),
+      share_url: lienPublic(post.id),
+      thumb_url: post.thumb_url || null,
+    },
+    auteur: {
+      id: post.user_id,
+      name: post.author_name,
+      publications: Number(total && total.n) || 0,
+    },
+  });
+}));
+
+// ─── POST /api/feed/posts/:id/share ──────────────────────────────────────────
+// Comptabilise un partage (lien copié ou envoi vers une autre application).
+r.post('/posts/:id/share', optionalAuth, ah(async (req, res) => {
+  const post = await db.get(
+    'SELECT id, visibilite, shares FROM posts WHERE id = ?', [req.params.id]);
+  if (!post || post.visibilite !== 'public')
+    return res.status(404).json({ error: 'Publication introuvable ou privée' });
+
+  await db.run('UPDATE posts SET shares = COALESCE(shares, 0) + 1 WHERE id = ?', [post.id]);
+  const relu = await db.get('SELECT shares FROM posts WHERE id = ?', [post.id]);
+
+  res.json({ partages: Number(relu && relu.shares) || 0, share_url: lienPublic(post.id) });
 }));
 
 // ─── GET /api/feed/posts/:id ─────────────────────────────────────────────────

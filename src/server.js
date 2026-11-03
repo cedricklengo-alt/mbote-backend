@@ -93,6 +93,10 @@ app.use('/api/contacts', require('./modules/contacts.routes'));
 app.use('/api/referral',   require('./modules/referral.routes'));
 app.use('/api/payments',   require('./modules/payments.routes')); // webhook agrégateur (public)
 app.use('/api/admin',      require('./modules/admin.routes'));
+// 🔗 Partage : page publique /p/:id, avec les balises d'aperçu que lisent
+// WhatsApp, Facebook et Telegram. Les routes de données publiques
+// (`/api/feed/posts/:id/public` et `/share`) vivent dans le module du fil.
+app.use(require('./modules/share.routes').r);
 app.use('/api/feed',       require('./modules/feed.routes'));
 app.use('/api/presence',   require('./modules/presence.routes'));
 app.use('/api/dial-later', require('./modules/dial_later.routes'));

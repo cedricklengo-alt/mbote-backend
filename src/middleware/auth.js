@@ -46,6 +46,28 @@ function requireAuth(req, res, next) {
   })().catch(next);
 }
 
+/**
+ * Authentification FACULTATIVE.
+ *
+ * Utilisée par les liens de partage : un visiteur non connecté doit pouvoir
+ * voir une publication PUBLIQUE (aperçu WhatsApp, page web), mais un membre
+ * connecté doit retrouver ses droits habituels (publications de ses contacts…).
+ * Sans jeton valide, on continue simplement sans `req.user`.
+ */
+function optionalAuth(req, res, next) {
+  (async () => {
+    const h = req.headers.authorization || '';
+    const token = h.startsWith('Bearer ') ? h.slice(7) : null;
+    if (!token) return next();
+    const payload = verifyToken(token);
+    if (!payload) return next();
+    const user = await db.get('SELECT * FROM users WHERE id = ?', [payload.uid]);
+    if (!user || user.status === 'blocked') return next();
+    req.user = user;
+    next();
+  })().catch(next);
+}
+
 function requireAdmin(req, res, next) {
   requireAuth(req, res, () => {
     if (req.user.role !== 'admin') return res.status(403).json({ error: 'Accès admin requis' });
@@ -53,4 +75,4 @@ function requireAdmin(req, res, next) {
   });
 }
 
-module.exports = { sign, verifyToken, requireAuth, requireAdmin };
+module.exports = { sign, verifyToken, requireAuth, optionalAuth, requireAdmin };

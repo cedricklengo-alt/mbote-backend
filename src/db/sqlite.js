@@ -492,6 +492,8 @@ const MIGRATIONS = [
   `ALTER TABLE posts ADD COLUMN vues INTEGER DEFAULT 0`,
   // 🖼️ v3.5 : miniature de la vidéo, capturée automatiquement à l'envoi
   `ALTER TABLE posts ADD COLUMN thumb_url TEXT`,
+  // 🔗 v3.6 : nombre de partages (lien copié ou envoyé à une autre application)
+  `ALTER TABLE posts ADD COLUMN shares INTEGER DEFAULT 0`,
   `CREATE TABLE IF NOT EXISTS post_views (
      post_id    TEXT NOT NULL,
      user_id    TEXT NOT NULL REFERENCES users(id),

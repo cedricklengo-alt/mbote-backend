@@ -476,6 +476,9 @@ ALTER TABLE posts ADD COLUMN IF NOT EXISTS vues INTEGER DEFAULT 0;
 /* Miniature de la vidéo, capturée automatiquement à l'envoi du fichier. */
 ALTER TABLE posts ADD COLUMN IF NOT EXISTS thumb_url TEXT;
 
+/* Nombre de partages : lien copié ou publication envoyée à une autre app. */
+ALTER TABLE posts ADD COLUMN IF NOT EXISTS shares INTEGER DEFAULT 0;
+
 /* Une ligne par (publication, lecteur) : le compteur ne peut pas être gonflé
  * en rafraîchissant la page. */
 CREATE TABLE IF NOT EXISTS post_views (
