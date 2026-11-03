@@ -42,6 +42,38 @@ function publicPackage(p) {
 }
 
 /** Liste les forfaits actifs du catalogue. */
+/**
+ * Crée les deux forfaits par défaut SI le catalogue est vide.
+ *
+ * Pourquoi ici et pas seulement dans le script de démarrage : la production
+ * (Render) sert l'API avec un catalogue VIDE — `GET /api/shop/catalog`
+ * répondait `{"packages": []}` et la boutique n'affichait aucun produit. Le
+ * remplissage dépendait du script `src/seed.js`, dont l'exécution au démarrage
+ * n'est pas garantie selon la commande configurée côté hébergeur.
+ *
+ * Idempotent : aucun effet si le catalogue contient déjà quelque chose, donc
+ * jamais de doublon et jamais de produit imposé à un vrai catalogue.
+ * @returns {Promise<number>} nombre de forfaits créés (0 si rien à faire)
+ */
+async function ensureCatalog() {
+  const n = await db.get('SELECT COUNT(*) n FROM shop_packages');
+  if (Number(n && n.n) > 0) return 0;
+  const created = now();
+  const forfaits = [
+    ['Pack RDC 100 minutes', 'Appels vers la RDC · valable 30 jours', 700, 100, 30, 1],
+    ['Pass RDC Illimité 30 jours', 'Appels vers la RDC · valable 30 jours', 1500, 0, 30, 2],
+  ];
+  for (const [name, description, price, minutes, days, sortOrder] of forfaits) {
+    await db.run(
+      `INSERT INTO shop_packages
+       (name,description,price_cents,currency,minutes,days,prefix,category,sort_order,created_at)
+       VALUES(?,?,?,?,?,?,?,?,?,?)`,
+      [name, description, price, 'USD', minutes, days, '243', 'minutes', sortOrder, created]
+    );
+  }
+  return forfaits.length;
+}
+
 async function listCatalog() {
   const rows = await db.all(
     `SELECT * FROM shop_packages WHERE active = 1 ORDER BY sort_order ASC, price_cents ASC`
@@ -471,6 +503,7 @@ async function createGiftOrder(userId, packageId, recipientPhone, recipientName)
 
 module.exports = {
   publicPackage,
+  ensureCatalog,
   listCatalog,
   getPackage,
   createOrder,

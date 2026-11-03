@@ -205,6 +205,14 @@ db.init().then(() => {
   // 🧹 Purge périodique des contenus livrés (confidentialité, rétention).
   try { require('./services/retention').start(); } catch (e) { console.error('retention :', e.message); }
 
+  // 🛒 Catalogue boutique : on ne dépend plus du script de démarrage pour le
+  // remplir. Sans ça, la production servait une boutique VIDE
+  // (`{"packages": []}`) alors que le service tournait normalement.
+  // Idempotent : rien n'est fait si le catalogue contient déjà un produit.
+  require('./services/shop').ensureCatalog()
+    .then((n) => { if (n > 0) console.log(`✅ Catalogue boutique initialisé (${n} forfaits)`); })
+    .catch((e) => console.error('catalogue :', e.message));
+
   rtcWs.init(server);           // ← WebSocket RTC (appels + présence + groupes)
   server.listen(PORT, '0.0.0.0', () => {
     console.log(`✅ MBOTE! backend démarré sur le port ${PORT}`);
