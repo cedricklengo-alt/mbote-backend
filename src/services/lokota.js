@@ -261,6 +261,23 @@ async function fetchPatient(doFetch, label) {
 }
 
 /** Traite une note (appelé en tâche de fond juste après l'envoi) */
+/* ── Filtre d'emojis ──────────────────────────────────────────────────────
+ * Depuis la tâche F, l'application n'affiche plus aucun emoji : tout est passé
+ * en icônes Material. Un texte traduit qui contient encore des emojis détonne
+ * dans l'interface, et certains téléphones d'entrée de gamme les rendent en
+ * carrés vides. On les retire donc À LA SORTIE du traducteur — les accents, la
+ * ponctuation et les chiffres sont conservés.
+ * ---------------------------------------------------------------------- */
+const EMOJI = /[\u{1F000}-\u{1FAFF}\u{2600}-\u{27BF}\u{2B00}-\u{2BFF}\u{2190}-\u{21FF}\u{2900}-\u{297F}\u{FE0F}\u{200D}\u{3030}\u{303D}\u{3297}\u{3299}]/gu;
+
+/** Nettoie un texte traduit : plus d'emoji, plus d'espace doublé. */
+function sansEmoji(texte) {
+  return String(texte || '')
+    .replace(EMOJI, '')
+    .replace(/[ \t]{2,}/g, ' ') // l'emoji retiré laisse souvent deux espaces
+    .trim();
+}
+
 async function processNote(id) {
   const note = await db.get('SELECT * FROM voice_notes WHERE id = ?', [id]);
   if (!note || note.status !== 'pending') return;
@@ -322,7 +339,7 @@ async function processNote(id) {
 
     await db.run(
       `UPDATE voice_notes SET transcript = ?, translation = ?, status = 'done' WHERE id = ?`,
-      [transcript, translation, id]);
+      [transcript, sansEmoji(translation), id]);
     console.log(`🗣️ [LOKOTA] Note ${id} traduite (${note.lang_from} → ${note.lang_to})`);
   } catch (e) {
     console.error(`⚠️ [LOKOTA] Échec traduction note ${id} :`, e.message);
@@ -366,7 +383,7 @@ async function processMessage(id) {
         temperature: 0.2,
         messages: [
           { role: 'system', content:
-            `Tu es un traducteur familial chaleureux, expert du lingala de Kinshasa et du swahili de l'Est du Congo. Traduis fidèlement ce message écrit du ${LANGS[msg.lang_from] || msg.lang_from} vers le ${LANGS[msg.lang_to] || msg.lang_to}. Garde le ton affectueux et naturel d'un message familial, y compris les emojis.\n${LEXIQUE}\nRéponds UNIQUEMENT avec la traduction, sans commentaire.` },
+            `Tu es un traducteur familial chaleureux, expert du lingala de Kinshasa et du swahili de l'Est du Congo. Traduis fidèlement ce message écrit du ${LANGS[msg.lang_from] || msg.lang_from} vers le ${LANGS[msg.lang_to] || msg.lang_to}. Garde le ton affectueux et naturel d'un message familial, mais n'utilise AUCUN emoji ni pictogramme.\n${LEXIQUE}\nRéponds UNIQUEMENT avec la traduction, sans commentaire.` },
           { role: 'user', content: msg.body },
         ],
       }),
@@ -375,7 +392,7 @@ async function processMessage(id) {
     const translation = (await cc.json()).choices?.[0]?.message?.content?.trim() || '';
     await db.run(
       `UPDATE messages SET translation = ? WHERE id = ?`,
-      [translation, id]);
+      [sansEmoji(translation), id]);
     console.log(`💬 [MESSAGES] ${id} traduit (${msg.lang_from} → ${msg.lang_to})`);
   } catch (e) {
     console.error(`⚠️ [MESSAGES] Échec traduction ${id} :`, e.message);
@@ -383,4 +400,4 @@ async function processMessage(id) {
   }
 }
 
-module.exports = { processNote, processMessage, mode, LANGS };
+module.exports = { processNote, processMessage, mode, LANGS, sansEmoji };

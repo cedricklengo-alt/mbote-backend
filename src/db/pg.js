@@ -489,6 +489,66 @@ const ops = (client) => ({
 const txContext = new AsyncLocalStorage();
 const currentClient = () => txContext.getStore() || pool;
 
+/* ── Réparation de schéma : colonnes historiquement BOOLEAN ───────────────
+ * La première version Postgres du schéma déclarait ces colonnes en BOOLEAN
+ * (`a1bfca8`). Elles sont depuis passées en INTEGER (0/1), MAIS
+ * `CREATE TABLE IF NOT EXISTS` ne modifie jamais une table déjà créée : une
+ * base née avant le changement garde des BOOLEAN, et une requête comme
+ * `WHERE active = 1` y échoue avec l'erreur Postgres 42883
+ * « operator does not exist: boolean = integer ».
+ *
+ * Constaté sur le déploiement Render le 3 novembre 2026 :
+ *   GET  /api/shop/catalog → 500 {"error":"Erreur interne","code":"42883"}
+ *   POST /api/shop/orders  → 500 (même cause)
+ * Autrement dit la boutique était inaccessible en production, alors que tout
+ * passait en local (SQLite ne vérifie pas les types).
+ *
+ * On lit le type réel dans information_schema et on ne convertit QUE si la
+ * colonne est encore BOOLEAN : la réparation est idempotente et sans effet sur
+ * une base déjà correcte.
+ * ------------------------------------------------------------------------ */
+const LEGACY_BOOLEAN_COLUMNS = [
+  { table: 'shop_packages', column: 'active', defaultValue: 1 },
+  { table: 'shop_packages', column: 'renewable', defaultValue: 0 },
+  { table: 'user_plans', column: 'unlimited', defaultValue: 0 },
+  { table: 'user_plans', column: 'is_gift', defaultValue: 0 },
+];
+
+/** Faut-il convertir cette colonne ? (fonction pure : testable sans base) */
+function needsBooleanRepair(dataType) {
+  return String(dataType || '').toLowerCase() === 'boolean';
+}
+
+/** Les ordres SQL qui transforment une colonne BOOLEAN en INTEGER 0/1. */
+function booleanRepairSql({ table, column, defaultValue }) {
+  return [
+    `ALTER TABLE ${table} ALTER COLUMN ${column} DROP DEFAULT`,
+    `ALTER TABLE ${table} ALTER COLUMN ${column} TYPE INTEGER ` +
+      `USING (CASE WHEN ${column} THEN 1 ELSE 0 END)`,
+    `ALTER TABLE ${table} ALTER COLUMN ${column} SET DEFAULT ${defaultValue === 1 ? 1 : 0}`,
+  ];
+}
+
+/** Applique la réparation sur la base connectée. Ne jette jamais. */
+async function repairLegacySchema(client) {
+  for (const cible of LEGACY_BOOLEAN_COLUMNS) {
+    try {
+      const { rows } = await client.query(
+        `SELECT data_type FROM information_schema.columns
+          WHERE table_schema = current_schema()
+            AND table_name = $1 AND column_name = $2`,
+        [cible.table, cible.column]
+      );
+      if (!rows.length || !needsBooleanRepair(rows[0].data_type)) continue;
+      for (const sql of booleanRepairSql(cible)) await client.query(sql);
+      console.log(`🛠️  schéma réparé : ${cible.table}.${cible.column} BOOLEAN → INTEGER`);
+    } catch (e) {
+      // Une réparation ratée ne doit JAMAIS empêcher le serveur de démarrer.
+      console.error(`🛠️  réparation impossible ${cible.table}.${cible.column} :`, e.message);
+    }
+  }
+}
+
 module.exports = {
   name: 'postgres',
   fn: {
@@ -505,6 +565,8 @@ module.exports = {
       max: 10,
     });
     await pool.query(SCHEMA);
+    // Rattrape les bases créées avant le passage BOOLEAN → INTEGER.
+    await repairLegacySchema(pool);
   },
 
   get: (sql, p) => ops(currentClient()).get(sql, p),
@@ -546,3 +608,11 @@ module.exports = {
 };
 
 let savepointSeq = 0;
+
+/** Points d'entrée exposés uniquement pour les tests (aucune connexion). */
+module.exports._schema = {
+  LEGACY_BOOLEAN_COLUMNS,
+  needsBooleanRepair,
+  booleanRepairSql,
+  repairLegacySchema,
+};

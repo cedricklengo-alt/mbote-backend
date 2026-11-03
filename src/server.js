@@ -167,6 +167,9 @@ app.get('/api/health', (req, res) => res.json({
   ok: true, service: 'mbote-backend', db: db.name,
   push: require('./services/push').enabled(),
   demo_mode: String(process.env.DEMO_MODE || 'true') === 'true',
+  // Commit réellement déployé : Render expose RENDER_GIT_COMMIT. Sans ce champ,
+  // impossible de savoir si la production tourne bien le dernier code poussé.
+  commit: (process.env.RENDER_GIT_COMMIT || '').slice(0, 7) || null,
 }));
 
 /* ---- Gestion d'erreurs ---- */
