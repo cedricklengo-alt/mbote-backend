@@ -120,9 +120,17 @@ function predicatVisibilite(userId, phone) {
   return { sql, params: [userId, userId, phone || ''] };
 }
 
-/** Prédicat « contenu public » : ce que n'importe qui peut découvrir. */
-function predicatPublic() {
-  return { sql: `p.visibilite IN ('public', 'communaute', 'communauté')`, params: [] };
+/**
+ * Prédicat de la DÉCOUVERTE (tendances, mots-clés) : uniquement `public`.
+ *
+ * Distinction assumée entre les deux audiences larges :
+ *   - `public`     : visible dans tous les fils ET mis en avant dans la découverte ;
+ *   - `communaute` : visible dans tous les fils, mais jamais mis en avant.
+ * C'est exactement ce que le formulaire annonce à l'auteur, et sans cette
+ * nuance les deux choix seraient identiques — donc trompeurs.
+ */
+function predicatDecouverte() {
+  return { sql: `p.visibilite = 'public'`, params: [] };
 }
 
 /**
@@ -177,7 +185,7 @@ module.exports = {
   normaliserTag,
   extraireTags,
   predicatVisibilite,
-  predicatPublic,
+  predicatDecouverte,
   predicatNonExpire,
   scoreInteret,
   trierParInteret,

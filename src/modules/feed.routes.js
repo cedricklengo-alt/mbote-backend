@@ -19,7 +19,7 @@
  *
  * ── Ce que fait ce module ─────────────────────────────────────────────────
  *   GET    /                      fil « Pour toi » (chronologique, tout le visible)
- *   GET    /discover              découverte : ?sort=tendances|recent, ?tag=, ?ville=
+ *   GET    /discover              découverte PUBLIQUE : ?sort=tendances|recent, ?tag=, ?ville=
  *   GET    /following             publications des auteurs que je suis
  *   GET    /tags                  mots-clés en tendance
  *   GET    /tags/:tag             publications d'un mot-clé
@@ -39,7 +39,7 @@ const fs      = require('fs');
 const { uid, now, ah } = require('../util');
 const {
   canoniserVisibilite, canoniserDuree, extraireTags, normaliserTag,
-  predicatVisibilite, predicatNonExpire, trierParInteret,
+  predicatVisibilite, predicatDecouverte, predicatNonExpire, trierParInteret,
 } = require('../services/feed_rules');
 
 
@@ -181,7 +181,8 @@ r.get('/discover', requireAuth, ah(async (req, res) => {
   const sel = selectPosts(userId);
   const exp = predicatNonExpire(t);
 
-  const filtres = [`p.visibilite IN ('public', 'communaute', 'communauté')`, exp.sql];
+  const filtrePublic = predicatDecouverte();
+  const filtres = [filtrePublic.sql, exp.sql];
   const params  = [...exp.params];
 
   if (tag) {
@@ -275,7 +276,7 @@ r.get('/tags', requireAuth, ah(async (req, res) => {
       FROM post_tags pt
       JOIN posts p ON p.id = pt.post_id
      WHERE p.created_at >= ?
-       AND p.visibilite IN ('public', 'communaute', 'communauté')
+       AND ${predicatDecouverte().sql}
      GROUP BY pt.tag
      ORDER BY publications DESC, engagement DESC
      LIMIT ?`, [depuis, limite]);
@@ -300,7 +301,7 @@ r.get('/tags/:tag', requireAuth, ah(async (req, res) => {
   const exp = predicatNonExpire(now());
 
   const posts = await db.all(`${sel.sql}
-    WHERE p.visibilite IN ('public', 'communaute', 'communauté')
+    WHERE ${predicatDecouverte().sql}
       AND ${exp.sql}
       AND p.id IN (SELECT pt.post_id FROM post_tags pt WHERE pt.tag = ?)
     ORDER BY p.created_at DESC

@@ -137,6 +137,18 @@ const contient = (page, texte) => textes(page).includes(texte);
     const decTend = await call('GET', '/feed/discover?sort=tendances', { token: C.token });
     ok('le tri « tendances » répond sans erreur', decTend.status === 200, decTend.status);
 
+    // Nuance assumée : « communauté » se voit dans les fils, mais n'est pas
+    // mise en avant. Sans cela les deux choix seraient identiques.
+    const pComm = await call('POST', '/feed/posts', {
+      token: Bo.token, body: { type: 'texte', texte: 'Réservé au fil', visibilite: 'communaute' },
+    });
+    const filComm = await call('GET', '/feed', { token: D.token });
+    ok('« communauté » visible dans le fil de tous', contient(filComm, 'Réservé au fil'));
+    const decComm = await call('GET', '/feed/discover?sort=recent', { token: D.token });
+    ok('« communauté » absente de la découverte',
+      !contient(decComm, 'Réservé au fil'),
+      (decComm.data.posts || []).map((p) => p.visibilite));
+
     console.log('\n6. Le score d’intérêt favorise ce qui intéresse');
     const t = Date.now();
     const engage = scoreInteret({ likes: 5, comments: 2, vues: 10, created_at: t - 3600e3 }, t);
