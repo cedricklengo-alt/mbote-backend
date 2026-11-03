@@ -3,6 +3,7 @@
  * Données PERSISTANTES : survivent aux redéploiements. (Neon, Render PG, Supabase…)
  */
 const { Pool, types } = require('pg');
+const { AsyncLocalStorage } = require('async_hooks');
 
 // PG renvoie les BIGINT/NUMERIC en chaînes → on les convertit en nombres JS
 types.setTypeParser(20, (v) => parseInt(v, 10));    // BIGINT (int8)
@@ -388,6 +389,7 @@ CREATE INDEX IF NOT EXISTS idx_watches_target    ON watches(target_phone);
 CREATE INDEX IF NOT EXISTS idx_dial_later_user   ON dial_later(user_id, cancelled);
 CREATE INDEX IF NOT EXISTS idx_shop_orders_user  ON shop_orders(user_id);
 CREATE INDEX IF NOT EXISTS idx_user_plans_user   ON user_plans(user_id, status);
+CREATE INDEX IF NOT EXISTS idx_user_plans_order  ON user_plans(order_id);
 CREATE INDEX IF NOT EXISTS idx_posts_created   ON posts(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_posts_user      ON posts(user_id);
 CREATE INDEX IF NOT EXISTS idx_stories_user    ON stories(user_id);
@@ -429,7 +431,42 @@ CREATE TABLE IF NOT EXISTS pending_gifts (
   claimed_at      BIGINT
 );
 CREATE INDEX IF NOT EXISTS idx_pending_gifts_phone ON pending_gifts(recipient_phone) WHERE claimed_at IS NULL;
+
+-- ── v3.6 TWILIO / SMS / HISTORIQUE ─────────────────────────────────────
+ALTER TABLE rates ADD COLUMN IF NOT EXISTS sms_price_cents INTEGER;
+ALTER TABLE calls ADD COLUMN IF NOT EXISTS provider_sid    TEXT;
+ALTER TABLE calls ADD COLUMN IF NOT EXISTS provider_status TEXT;
+ALTER TABLE calls ADD COLUMN IF NOT EXISTS hidden_at       INTEGER;
+ALTER TABLE payments ADD COLUMN IF NOT EXISTS redirect_url TEXT;
+ALTER TABLE shop_payments ADD COLUMN IF NOT EXISTS redirect_url TEXT;
+CREATE INDEX IF NOT EXISTS idx_calls_provider_sid ON calls(provider_sid);
+
+CREATE TABLE IF NOT EXISTS sms_messages (
+  id             TEXT PRIMARY KEY,
+  user_id        TEXT NOT NULL REFERENCES users(id),
+  to_phone       TEXT NOT NULL,
+  from_phone     TEXT,
+  body           TEXT NOT NULL DEFAULT '',
+  status         TEXT NOT NULL DEFAULT 'queued',
+  provider       TEXT NOT NULL DEFAULT 'twilio',
+  provider_sid   TEXT,
+  segments       INTEGER,
+  price_cents    INTEGER DEFAULT 0,
+  charged_cents  INTEGER DEFAULT 0,
+  plan_id        TEXT,
+  reference      TEXT NOT NULL,
+  client_id      TEXT,
+  error_code     TEXT,
+  error_message  TEXT,
+  refunded_at    BIGINT,
+  created_at     BIGINT NOT NULL,
+  updated_at     BIGINT
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_sms_client ON sms_messages(user_id, client_id);
+CREATE INDEX IF NOT EXISTS idx_sms_user ON sms_messages(user_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_sms_sid ON sms_messages(provider_sid);
 `;
+
 
 // Convertit les placeholders « ? » (style SQLite) en « $1, $2… » (style PG)
 const toPg = (sql) => {
@@ -444,6 +481,13 @@ const ops = (client) => ({
   all: async (sql, p = []) => (await client.query(toPg(sql), p)).rows,
   run: async (sql, p = []) => { await client.query(toPg(sql), p); },
 });
+
+// 🔒 RÉENTRANCE — un db.get/db.run/db.all appelé À L'INTÉRIEUR d'un db.tx doit
+// passer par LA MÊME connexion que la transaction. Sinon il lit l'état d'avant
+// la transaction (données incohérentes) et peut se bloquer sur un verrou de
+// ligne. AsyncLocalStorage porte la connexion courante.
+const txContext = new AsyncLocalStorage();
+const currentClient = () => txContext.getStore() || pool;
 
 module.exports = {
   name: 'postgres',
@@ -463,15 +507,33 @@ module.exports = {
     await pool.query(SCHEMA);
   },
 
-  get: (sql, p) => ops(pool).get(sql, p),
-  all: (sql, p) => ops(pool).all(sql, p),
-  run: (sql, p) => ops(pool).run(sql, p),
+  get: (sql, p) => ops(currentClient()).get(sql, p),
+  all: (sql, p) => ops(currentClient()).all(sql, p),
+  run: (sql, p) => ops(currentClient()).run(sql, p),
 
+  /**
+   * Transaction atomique. Appelable depuis une transaction en cours : on
+   * utilise alors un SAVEPOINT sur la même connexion (pas de nouvelle
+   * connexion, pas de blocage).
+   */
   async tx(fn) {
+    const parent = txContext.getStore();
+    if (parent) {
+      const name = `sp_${++savepointSeq}`;
+      await parent.query(`SAVEPOINT ${name}`);
+      try {
+        const r = await fn(ops(parent));
+        await parent.query(`RELEASE SAVEPOINT ${name}`);
+        return r;
+      } catch (e) {
+        await parent.query(`ROLLBACK TO SAVEPOINT ${name}`).catch(() => {});
+        throw e;
+      }
+    }
     const client = await pool.connect();
     try {
       await client.query('BEGIN');
-      const r = await fn(ops(client));
+      const r = await txContext.run(client, () => fn(ops(client)));
       await client.query('COMMIT');
       return r;
     } catch (e) {
@@ -482,3 +544,5 @@ module.exports = {
     }
   },
 };
+
+let savepointSeq = 0;

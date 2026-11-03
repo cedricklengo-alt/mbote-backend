@@ -134,11 +134,14 @@ async function createShopPayment(orderId, method, phone) {
       reference:    payRow.reference,
       amount_cents: payRow.amount_cents,
       currency:     payRow.currency,
+      method:       payRow.method,
       phone:        payRow.phone,
       order_number: null,
+      created_at:   payRow.created_at,
     };
-    const { order_number } = await provider.initiate(adapted);
-    await db.run(`UPDATE shop_payments SET order_number=? WHERE id=?`, [order_number, payId]);
+    const { order_number, redirect_url } = await provider.initiate(adapted);
+    await db.run(`UPDATE shop_payments SET order_number=?, redirect_url=? WHERE id=?`,
+      [order_number, redirect_url || null, payId]);
   } catch (e) {
     await db.run(`UPDATE shop_payments SET status='failed', updated_at=? WHERE id=?`, [now(), payId]);
     throw e;
@@ -222,18 +225,23 @@ async function activateOrder(paymentId, confirmedAmount) {
       }
     }
     if (!order.recipient_phone || isGift) {
+      // Idempotence SANS dépendre d'une contrainte UNIQUE : `ON CONFLICT
+      // (order_id)` échouait (aucune contrainte UNIQUE sur cette colonne) et
+      // empêchait TOUTE activation de forfait. `WHERE NOT EXISTS` fonctionne
+      // à l'identique sur SQLite et PostgreSQL.
       await t.run(
         `INSERT INTO user_plans
            (id, user_id, order_id, package_id, package_name, prefix,
             minutes_total, remaining_sec, sms_total, remaining_sms,
             unlimited, recipient_phone, is_gift, activated_at, expires_at, status)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active')
-         ON CONFLICT(order_id) DO NOTHING`,
+         SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active'
+         WHERE NOT EXISTS (SELECT 1 FROM user_plans WHERE order_id = ?)`,
         [
           planId, planUserId, order.id, order.package_id, order.package_name,
           pkg.prefix || '', pkg.minutes || 0, remainingSec,
           pkg.sms_count || 0, pkg.sms_count || 0, unlimited,
           isGift ? order.recipient_phone : null, isGift, activatedAt, expiresAt,
+          order.id,
         ]
       );
     }
@@ -261,12 +269,21 @@ async function pollAndActivate(shopPayment) {
   if (shopPayment.status !== 'pending') return shopPayment.status;
 
   const provider = getPayProvider();
-  // Adapter pour l'interface checkStatus du provider
+  // Adapter pour l'interface checkStatus du provider.
+  // ⚠️ TOUS les champs utilisés par les providers doivent être transmis :
+  // le provider démo s'appuie sur `phone` (numéro se terminant par 0001 =
+  // paiement refusé) et sur `created_at` (délai de confirmation). Sans eux,
+  // chaque interrogation de statut levait une TypeError → 500, et le forfait
+  // n'était JAMAIS activé.
   const adapted = {
     id:           shopPayment.id,
     reference:    shopPayment.reference,
     amount_cents: shopPayment.amount_cents,
+    currency:     shopPayment.currency || 'USD',
+    method:       shopPayment.method,
+    phone:        shopPayment.phone,
     order_number: shopPayment.order_number,
+    created_at:   shopPayment.created_at,
   };
 
   const state = await provider.checkStatus(adapted);
@@ -329,13 +346,13 @@ async function claimGiftPlans(userId, phone) {
         INSERT INTO user_plans
           (id,user_id,order_id,package_id,package_name,prefix,minutes_total,remaining_sec,
            sms_total,remaining_sms,unlimited,recipient_phone,is_gift,activated_at,expires_at,status)
-        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'active')
-        ON CONFLICT(order_id) DO NOTHING
+        SELECT ?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'active'
+        WHERE NOT EXISTS (SELECT 1 FROM user_plans WHERE order_id = ?)
       `, [
         uid('upl'), userId, gift.order_id, gift.package_id, gift.package_name,
         pkg.prefix || '', minutes, minutes * 60, Number(pkg.sms_count) || 0,
         Number(pkg.sms_count) || 0, minutes === 0 ? 1 : 0, phone, 1,
-        activatedAt, activatedAt + days * 24 * 60 * 60 * 1000,
+        activatedAt, activatedAt + days * 24 * 60 * 60 * 1000, gift.order_id,
       ]);
       await t.run('UPDATE pending_gifts SET user_id=?,claimed_at=? WHERE order_id=? AND claimed_at IS NULL',
         [userId, activatedAt, gift.order_id]);
@@ -428,13 +445,12 @@ async function consumeSms(userId, prefix, count) {
  * L'expéditeur (userId) paie via Mobile Money ou Visa.
  */
 async function createGiftOrder(userId, packageId, recipientPhone, recipientName) {
-  const db = require('../db');
   const pkg = await getPackage(packageId);
   if (!pkg) throw Object.assign(new Error('Forfait introuvable'), { status: 404 });
 
-  const id      = require('crypto').randomUUID();
-  const now     = Date.now();
-  const expires = now + 30 * 60 * 1000; // 30 min
+  const orderId   = uid('ord');
+  const createdAt = now();
+  const expiresAt = createdAt + 30 * 60 * 1000; // 30 min
 
   await db.run(
     `INSERT INTO shop_orders
@@ -443,13 +459,14 @@ async function createGiftOrder(userId, packageId, recipientPhone, recipientName)
         created_at, expires_at)
      VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?)`,
     [
-      id, userId, pkg.id, pkg.name, JSON.stringify(pkg),
+      orderId, userId, pkg.id, pkg.name, JSON.stringify(publicPackage(pkg)),
       pkg.price_cents, pkg.currency || 'USD',
       recipientPhone, recipientName || null,
-      now, expires,
+      createdAt, expiresAt,
     ]
   );
-  return { id, packageId: pkg.id, packageName: pkg.name, amountCents: pkg.price_cents, recipientPhone, recipientName };
+  // Même forme que createOrder (ligne snake_case) : un seul contrat pour l'API.
+  return db.get(`SELECT * FROM shop_orders WHERE id = ?`, [orderId]);
 }
 
 module.exports = {

@@ -70,9 +70,109 @@ r.post('/users/:id/credit', requireAdmin, ah(async (req, res) => {
 }));
 
 r.post('/users/:id/status', requireAdmin, ah(async (req, res) => {
-  const status = req.body.status === 'blocked' ? 'blocked' : 'active';
+  // ⚠️ Avant : toute valeur inconnue était convertie en 'active' — une faute de
+  // frappe dans la console DÉBLOQUAIT le compte sans le dire. On refuse net.
+  const status = String(req.body.status || '');
+  if (!['active', 'blocked'].includes(status))
+    return res.status(400).json({ error: 'Statut invalide (active ou blocked)' });
+
+  const user = await db.get(`SELECT id, status FROM users WHERE id = ? AND role = 'user'`, [req.params.id]);
+  if (!user) return res.status(404).json({ error: 'Utilisateur introuvable' });
+
   await db.run(`UPDATE users SET status = ? WHERE id = ? AND role = 'user'`, [status, req.params.id]);
   res.json({ ok: true, status });
+}));
+
+/* ---- Forfaits de la boutique (onglet « Forfaits » de la console) ----
+ * La console appelait /api/admin/packages alors que seules les routes
+ * /api/shop/admin/packages existaient : l'onglet restait vide et ses boutons
+ * « Activer / Supprimer » ne faisaient rien. */
+r.get('/packages', requireAdmin, ah(async (req, res) => {
+  res.json(await db.all('SELECT * FROM shop_packages ORDER BY sort_order ASC, id ASC'));
+}));
+
+r.post('/packages', requireAdmin, ah(async (req, res) => {
+  const {
+    name, description = '', price_cents, currency = 'USD',
+    minutes = 0, sms_count = 0, days = 30,
+    prefix = '', category = 'credit', conditions = '',
+    renewable = false, sort_order = 0,
+  } = req.body;
+
+  if (!name || String(name).trim().length === 0)
+    return res.status(400).json({ error: 'Le nom est requis' });
+  const prix = Number(price_cents);
+  if (!Number.isFinite(prix) || prix < 0)
+    return res.status(400).json({ error: 'price_cents (≥ 0) est requis' });
+  const mins = Math.round(Number(minutes) || 0);
+  const jours = Math.round(Number(days) || 0);
+  if (mins < 0 || jours < 1)
+    return res.status(400).json({ error: 'minutes ≥ 0 et days ≥ 1 attendus' });
+
+  const id = Date.now(); // identifiant entier (portable SQLite / PostgreSQL)
+  await db.run(
+    `INSERT INTO shop_packages
+       (id, name, description, price_cents, currency, minutes, sms_count, days,
+        prefix, category, conditions, renewable, sort_order, active, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)`,
+    [id, String(name).slice(0, 120), String(description).slice(0, 300), Math.round(prix),
+     String(currency).slice(0, 3), mins, Math.round(Number(sms_count) || 0), jours,
+     String(prefix).replace(/\D/g, ''), String(category).slice(0, 40),
+     String(conditions).slice(0, 300), renewable ? 1 : 0, Math.round(Number(sort_order) || 0), now()],
+  );
+  res.status(201).json({ ok: true, package: await db.get('SELECT * FROM shop_packages WHERE id = ?', [id]) });
+}));
+
+r.put('/packages/:id', requireAdmin, ah(async (req, res) => {
+  const pack = await db.get('SELECT * FROM shop_packages WHERE id = ?', [req.params.id]);
+  if (!pack) return res.status(404).json({ error: 'Forfait introuvable' });
+
+  const sets = [];
+  const vals = [];
+  const num = (v) => (Number.isFinite(Number(v)) ? Math.round(Number(v)) : null);
+
+  if (req.body.active !== undefined) {
+    sets.push('active = ?');
+    vals.push(req.body.active ? 1 : 0);
+  }
+  for (const f of ['price_cents', 'minutes', 'days', 'sms_count', 'sort_order']) {
+    if (req.body[f] !== undefined) {
+      const n = num(req.body[f]);
+      if (n === null || n < 0) return res.status(400).json({ error: `${f} invalide` });
+      sets.push(`${f} = ?`);
+      vals.push(n);
+    }
+  }
+  for (const f of ['name', 'prefix', 'category', 'description']) {
+    if (req.body[f] !== undefined) {
+      sets.push(`${f} = ?`);
+      vals.push(String(req.body[f]).slice(0, 200));
+    }
+  }
+  if (!sets.length) return res.status(400).json({ error: 'Aucun champ à modifier' });
+
+  await db.run(`UPDATE shop_packages SET ${sets.join(', ')} WHERE id = ?`, [...vals, pack.id]);
+  res.json({ ok: true, package: await db.get('SELECT * FROM shop_packages WHERE id = ?', [pack.id]) });
+}));
+
+r.delete('/packages/:id', requireAdmin, ah(async (req, res) => {
+  const pack = await db.get('SELECT id FROM shop_packages WHERE id = ?', [req.params.id]);
+  if (!pack) return res.status(404).json({ error: 'Forfait introuvable' });
+  // Les commandes et les forfaits déjà activés conservent leur propre
+  // instantané (package_name, package_snapshot) : rien n'est perdu.
+  await db.run('DELETE FROM shop_packages WHERE id = ?', [pack.id]);
+  res.json({ ok: true });
+}));
+
+/* ---- Recharges de crédit GSM (onglet « Crédit GSM ») ---- */
+r.get('/airtime', requireAdmin, ah(async (req, res) => {
+  res.json(await db.all(`
+    SELECT a.id, a.phone, a.operator, a.amount_cents, a.status, a.provider,
+           a.reference, a.created_at, u.phone AS user_phone, u.name AS user_name
+      FROM airtime_topups a
+      LEFT JOIN users u ON u.id = a.user_id
+     ORDER BY a.created_at DESC
+     LIMIT 200`));
 }));
 
 /* ---- Tarifs (CRUD) ---- */

@@ -13,11 +13,65 @@ const db = require('./db');
 const rtcWs = require('./modules/rtc.ws');
 
 const app = express();
-app.use(express.json());
 
-// Journal des requêtes (diagnostic)
+// 🌐 Derrière le répartiteur de charge de l'hébergeur : sans cela, req.ip vaut
+// l'IP du répartiteur pour TOUT LE MONDE → un seul quota partagé par tous les
+// utilisateurs (et une limitation de débit inopérante).
+app.set('trust proxy', 1);
+
+// Corps JSON — 4 Mo : les notes vocales et les pièces jointes voyagent en
+// JSON/base64 et dépassent largement la limite par défaut d'Express (100 ko),
+// qui renvoyait 413 sur toute note de plus de ~75 ko.
+// `verify` conserve le corps BRUT, indispensable à la vérification HMAC-SHA256
+// du webhook de paiement (sans lui, la signature ne peut jamais correspondre).
+app.use(express.json({
+  limit: '4mb',
+  verify: (req, _res, buf) => {
+    if (req.url && (req.url.includes('/webhook') || req.url.includes('/payments') ||
+                    req.url.includes('/api/twilio'))) {
+      req.rawBody = buf;
+    }
+  },
+}));
+
+/* 🛡️ En-têtes de sécurité (OWASP MSTG-NETWORK) */
+const { rateLimit } = require('./middleware/ratelimit');
+const crypto = require('crypto');
+app.disable('x-powered-by'); // ne pas révéler la technologie du serveur
+
 app.use((req, res, next) => {
-  console.log(`➡️  ${req.method} ${req.url}`);
+  res.set({
+    'X-Content-Type-Options':    'nosniff',
+    'X-Frame-Options':           'DENY',
+    'Referrer-Policy':           'no-referrer',
+    'Strict-Transport-Security': 'max-age=31536000; includeSubDomains',
+    // API JSON : aucun contenu externe n'est nécessaire (la console admin
+    // n'utilise que ses propres ressources).
+    'Content-Security-Policy':
+      "default-src 'none'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'",
+    'X-XSS-Protection':          '1; mode=block',
+    'Permissions-Policy':
+      'camera=(), microphone=(), geolocation=(), payment=(), usb=(), interest-cohort=()',
+  });
+  next();
+});
+
+// Limite globale anti-inondation : 1200 requêtes/min par compte (ou par IP).
+// Volontairement haute : les clients légitimes peuvent synchroniser plusieurs
+// écrans en parallèle, mais un script ne peut plus saturer le serveur.
+app.use(rateLimit({
+  windowMs: 60_000, max: 1200,
+  key: (req) => {
+    const h = req.headers.authorization;
+    return h ? 'tok:' + crypto.createHash('sha1').update(h).digest('hex').slice(0, 16)
+             : 'ip:' + req.ip;
+  },
+}));
+
+// Journal des requêtes (diagnostic) — req.path et non req.url : la query string
+// contient des numéros de téléphone, qui n'ont rien à faire dans les journaux.
+app.use((req, res, next) => {
+  console.log(`➡️  ${req.method} ${req.path}`);
   next();
 });
 
@@ -60,9 +114,18 @@ app.use('/api/shop',      require('./modules/shop.routes'));     // boutique et 
 app.use('/api/packages',  require('./modules/packages.routes')); // forfaits
 app.use('/api/airtime',   require('./modules/airtime.routes'));  // crédit téléphonique
 app.use('/api/i18n',      require('./modules/i18n.routes'));     // libellés traduits
+app.use('/api/sms',       require('./modules/sms.routes'));      // SMS vers GSM (facturés)
+app.use('/api/twilio',    require('./modules/twilio.routes'));   // webhooks + supervision fournisseur
 
-// Lien d'invitation magique (Feature B) — redirect public
-app.use('/invite',         require('./modules/invite.routes'));
+// Lien d'invitation magique (Feature B).
+//   POST /api/invite                   → créer un lien (authentifié)
+//   GET  /api/invite/validate/:token   → valider après installation
+//   GET  /invite/:token                → page publique de redirection
+// Auparavant monté uniquement sous /invite : les routes documentées
+// /api/invite… répondaient 404.
+const inviteRoutes = require('./modules/invite.routes');
+app.use('/api/invite', inviteRoutes);
+app.use('/invite',     inviteRoutes);
 
 
 /* ---- Upload média (photos / clips) ---- */
@@ -102,21 +165,43 @@ app.get('/', (req, res) => res.redirect('/admin'));
 /* ---- Santé ---- */
 app.get('/api/health', (req, res) => res.json({
   ok: true, service: 'mbote-backend', db: db.name,
+  push: require('./services/push').enabled(),
   demo_mode: String(process.env.DEMO_MODE || 'true') === 'true',
 }));
 
 /* ---- Gestion d'erreurs ---- */
 app.use((err, req, res, next) => {
   const status = err.status || err.statusCode || 500;
-  const msg    = err.expose ? err.message : 'Erreur interne';
+  // Les erreurs 4xx sont des messages MÉTIER destinés à l'utilisateur
+  // (« Forfait introuvable », « Commande expirée »…) : on les transmet.
+  // Les 5xx restent masquées pour ne jamais exposer une trace interne.
+  const msg    = (err.expose || status < 500) ? err.message : 'Erreur interne';
+  // Le code métier (SMS_NOT_CONFIGURED, NO_CREDIT…) permet à l'app d'afficher
+  // un message utile au lieu d'un texte générique.
+  const code   = err.code && typeof err.code === 'string' ? err.code : undefined;
   console.error(`💥 ${req.method} ${req.path} → ${status}`, err.stack || err.message || err);
-  res.status(status).json({ error: msg });
+  res.status(status).json(code ? { error: msg, code } : { error: msg });
 });
+
+// 🛟 Une promesse oubliée ne doit JAMAIS faire tomber le serveur
+process.on('unhandledRejection', (e) => console.error('💥 Promesse non gérée :', (e && e.message) || e));
+process.on('uncaughtException',  (e) => console.error('💥 Exception non gérée :', (e && e.stack) || e));
 
 const PORT = process.env.PORT || 4000;
 const server = http.createServer(app);
 
 db.init().then(() => {
+  // 🔔 Push : initialisation + purge automatique des jetons FCM périmés.
+  // Sans le gestionnaire de jetons invalides, un appareil désinstallé
+  // recevait des envois en échec pour toujours.
+  const push = require('./services/push');
+  push.setInvalidTokenHandler((tk) =>
+    db.run('UPDATE users SET fcm_token = NULL WHERE fcm_token = ?', [tk]));
+  push.init();
+
+  // 🧹 Purge périodique des contenus livrés (confidentialité, rétention).
+  try { require('./services/retention').start(); } catch (e) { console.error('retention :', e.message); }
+
   rtcWs.init(server);           // ← WebSocket RTC (appels + présence + groupes)
   server.listen(PORT, '0.0.0.0', () => {
     console.log(`✅ MBOTE! backend démarré sur le port ${PORT}`);

@@ -4,6 +4,7 @@
  */
 const Database = require('better-sqlite3');
 const path = require('path');
+const { AsyncLocalStorage } = require('async_hooks');
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS users (
@@ -321,6 +322,7 @@ const MIGRATIONS = [
    )`,
   `CREATE INDEX IF NOT EXISTS idx_user_plans_user ON user_plans(user_id, status)`,
   `CREATE INDEX IF NOT EXISTS idx_user_plans_expires ON user_plans(expires_at)`,
+  `CREATE INDEX IF NOT EXISTS idx_user_plans_order ON user_plans(order_id)`,
 
   // ── v3.2 APPELS — colonnes de facturation manquantes ──
   `ALTER TABLE calls ADD COLUMN billed_sec INTEGER DEFAULT 0`,
@@ -443,7 +445,50 @@ const MIGRATIONS = [
      claimed_at      INTEGER
   )`,
   `CREATE INDEX IF NOT EXISTS idx_pending_gifts_phone ON pending_gifts(recipient_phone)`,
+  // ── v3.6 TWILIO / SMS / HISTORIQUE ─────────────────────────────────────
+  // Prix d'un SMS par destination. NULL = tarif NON configuré → l'envoi est
+  // refusé au lieu de débiter un montant inventé.
+  `ALTER TABLE rates ADD COLUMN sms_price_cents INTEGER`,
+  // SID de l'appel chez Twilio : permet de rapprocher le CDR client et la
+  // ressource fournisseur (statuts, prix consolidé).
+  `ALTER TABLE calls ADD COLUMN provider_sid TEXT`,
+  `ALTER TABLE calls ADD COLUMN provider_status TEXT`,
+  // Suppression « pour moi » d'une entrée d'historique : la ligne reste en
+  // base (comptabilité, audit) et disparaît seulement de la liste du client.
+  `ALTER TABLE calls ADD COLUMN hidden_at INTEGER`,
+  // URL de redirection d'un paiement par carte (page hébergée FlexPay).
+  `ALTER TABLE payments ADD COLUMN redirect_url TEXT`,
+  `ALTER TABLE shop_payments ADD COLUMN redirect_url TEXT`,
+  `CREATE INDEX IF NOT EXISTS idx_calls_provider_sid ON calls(provider_sid)`,
+
+  // Journal des SMS sortants : statut fournisseur, coût, quota de forfait.
+  `CREATE TABLE IF NOT EXISTS sms_messages (
+     id             TEXT PRIMARY KEY,
+     user_id        TEXT NOT NULL REFERENCES users(id),
+     to_phone       TEXT NOT NULL,
+     from_phone     TEXT,
+     body           TEXT NOT NULL DEFAULT '',
+     status         TEXT NOT NULL DEFAULT 'queued',
+     provider       TEXT NOT NULL DEFAULT 'twilio',
+     provider_sid   TEXT,
+     segments       INTEGER,
+     price_cents    INTEGER DEFAULT 0,
+     charged_cents  INTEGER DEFAULT 0,
+     plan_id        TEXT,
+     reference      TEXT NOT NULL,
+     client_id      TEXT,
+     error_code     TEXT,
+     error_message  TEXT,
+     refunded_at    INTEGER,
+     created_at     INTEGER NOT NULL,
+     updated_at     INTEGER
+   )`,
+  `CREATE UNIQUE INDEX IF NOT EXISTS idx_sms_client
+     ON sms_messages(user_id, client_id)`,
+  `CREATE INDEX IF NOT EXISTS idx_sms_user ON sms_messages(user_id, created_at)`,
+  `CREATE INDEX IF NOT EXISTS idx_sms_sid ON sms_messages(provider_sid)`,
 ];
+
 
 let db;
 
@@ -454,6 +499,16 @@ const lock = (fn) => {
   chain = p.catch(() => {});
   return p;
 };
+
+// 🔒 RÉENTRANCE — Un code qui appelle db.get/db.run/db.all À L'INTÉRIEUR d'un
+// db.tx() ne doit PAS se remettre dans la file d'attente : la transaction
+// occupe déjà la file, l'attente serait infinie et gèlerait TOUTES les requêtes
+// du serveur. AsyncLocalStorage nous dit si l'on est déjà dans une transaction ;
+// dans ce cas on exécute directement sur la connexion courante (donc DANS la
+// transaction, ce qui est aussi le comportement attendu).
+const txContext = new AsyncLocalStorage();
+const insideTx = () => txContext.getStore() !== undefined;
+const guarded = (fn) => (insideTx() ? fn() : lock(fn));
 
 // Opérations brutes (synchrones), utilisées À L'INTÉRIEUR des transactions
 const raw = {
@@ -478,20 +533,45 @@ module.exports = {
     for (const m of MIGRATIONS) { try { db.exec(m); } catch { /* colonne déjà présente */ } }
   },
 
-  get: (sql, p) => lock(() => raw.get(sql, p)),
-  all: (sql, p) => lock(() => raw.all(sql, p)),
-  run: (sql, p) => lock(() => raw.run(sql, p)),
+  get: (sql, p) => guarded(() => raw.get(sql, p)),
+  all: (sql, p) => guarded(() => raw.all(sql, p)),
+  run: (sql, p) => guarded(() => raw.run(sql, p)),
 
-  tx: (fn) =>
-    lock(async () => {
-      db.exec('BEGIN');
-      try {
-        const r = await fn(raw);
-        db.exec('COMMIT');
-        return r;
-      } catch (e) {
-        db.exec('ROLLBACK');
-        throw e;
-      }
-    }),
+  /**
+   * Transaction atomique. Appelable à l'intérieur d'une transaction : dans ce
+   * cas on utilise un SAVEPOINT (les sous-transactions restent réversibles
+   * sans casser la transaction parente).
+   */
+  tx: (fn) => {
+    if (insideTx()) return savepoint(fn);
+    return lock(() =>
+      txContext.run(true, async () => {
+        db.exec('BEGIN');
+        try {
+          const r = await fn(raw);
+          db.exec('COMMIT');
+          return r;
+        } catch (e) {
+          db.exec('ROLLBACK');
+          throw e;
+        }
+      })
+    );
+  },
 };
+
+// Sous-transaction (appel de db.tx depuis une transaction en cours)
+let savepointSeq = 0;
+async function savepoint(fn) {
+  const name = `sp_${++savepointSeq}`;
+  db.exec(`SAVEPOINT ${name}`);
+  try {
+    const r = await fn(raw);
+    db.exec(`RELEASE ${name}`);
+    return r;
+  } catch (e) {
+    db.exec(`ROLLBACK TO ${name}`);
+    db.exec(`RELEASE ${name}`);
+    throw e;
+  }
+}

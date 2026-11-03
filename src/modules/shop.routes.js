@@ -167,7 +167,15 @@ router.post('/orders/:id/pay', requireAuth, ah(async (req, res) => {
   if (!order) return res.status(404).json({ error: 'Commande introuvable' });
 
   const payment = await shop.createShopPayment(order.id, method, phone);
-  res.status(201).json({ payment });
+  res.status(201).json({
+    payment,
+    // Carte Visa : URL de la page de paiement hébergée par FlexPay.
+    redirect_url: payment.redirect_url || null,
+    // Mobile Money : le client doit valider sur son téléphone.
+    message: method === 'card'
+      ? 'Terminez le paiement sur la page sécurisée, puis revenez ici.'
+      : 'Confirmez le paiement sur votre téléphone, puis revenez ici.',
+  });
 }));
 
 // Polling du statut du paiement (l'app interroge pendant l'attente Mobile Money)

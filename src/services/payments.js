@@ -24,8 +24,9 @@ async function createPayment({ userId, amountCents, method, phone }) {
 
   const payment = await db.get('SELECT * FROM payments WHERE id = ?', [id]);
   try {
-    const { order_number } = await provider.initiate(payment);
-    await db.run('UPDATE payments SET order_number = ? WHERE id = ?', [order_number, id]);
+    const { order_number, redirect_url } = await provider.initiate(payment);
+    await db.run('UPDATE payments SET order_number = ?, redirect_url = ? WHERE id = ?',
+      [order_number, redirect_url || null, id]);
   } catch (e) {
     await db.run(`UPDATE payments SET status='failed', updated_at=? WHERE id=?`, [now(), id]);
     throw e;

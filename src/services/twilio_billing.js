@@ -42,6 +42,11 @@ async function finalizeTwilioCall({
 }) {
   const rawSec     = Math.max(0, Math.floor(Number(durationSec) || 0));
   const wasConnected = status === 'completed';
+  // ⚠️ `status` arrive avec le vocabulaire Twilio (completed / busy /
+  // no-answer…). L'état INTERNE d'un appel terminé est toujours 'ended' :
+  // le reste des écrans et des requêtes (« un appel est-il en cours ? »)
+  // s'appuie dessus. La cause fournisseur est conservée dans hangup_cause.
+  const causeFournisseur = status;
 
   // Durée facturable : minimum MIN_BILLABLE_SEC pour les appels réellement connectés
   const billedSec  = wasConnected && rawSec > 0
@@ -58,20 +63,28 @@ async function finalizeTwilioCall({
     : null;
 
   return db.tx(async (t) => {
-    // Mise à jour de l'appel
+    // Mise à jour de l'appel.
+    // ⚠️ La table `calls` ne possède PAS de colonne `duration` : la durée
+    // brute et la durée facturable vivent dans `billed_sec`. L'ancienne
+    // requête écrivait `duration=?` et levait « no such column: duration » à
+    // CHAQUE fin d'appel GSM — l'appel restait « en cours » et n'était jamais
+    // facturé. Corrigé ici (bug détecté par test/twilio_sms.test.js).
     await t.run(
       `UPDATE calls
-       SET status=?, duration=?, billed_sec=?, cost_cents=?,
-           provider_cost_cents=?, provider_currency=?, ended_at=?
+       SET status='ended', hangup_cause=?, billed_sec=?, cost_cents=?,
+           provider_sid = COALESCE(provider_sid, provider_sid),
+           provider_status=?, provider_cost_cents=?, provider_currency=?, ended_at=?,
+           answered_at = COALESCE(answered_at, ?)
        WHERE id=?`,
       [
-        status,
-        rawSec,
+        causeFournisseur,
         billedSec,
         debitCents,
+        causeFournisseur,
         providerCents,
         twilioPriceCurrency || null,
         now(),
+        status === 'completed' && rawSec > 0 ? now() - rawSec * 1000 : null,
         callId,
       ]
     );
@@ -81,19 +94,25 @@ async function finalizeTwilioCall({
       const wallet = await t.get(`SELECT balance_cents FROM wallets WHERE user_id=?`, [userId]);
       if (!wallet) throw new Error('Portefeuille introuvable');
 
-      // Débiter — on n'échoue pas si le solde est négatif (l'appel est déjà terminé)
-      // mais on le consigne clairement
+      // Débiter sans jamais passer sous zéro : un appel déjà terminé ne peut
+      // pas être « annulé », mais le portefeuille ne doit pas devenir négatif
+      // (plancher 0). L'écart éventuel reste visible dans le CDR et la console.
+      const G = db.fn.greatest;
       await t.run(
-        `UPDATE wallets SET balance_cents = balance_cents - ? WHERE user_id=?`,
+        `UPDATE wallets SET balance_cents = ${G}(0, balance_cents - ?) WHERE user_id=?`,
         [debitCents, userId]
       );
 
+      // ⚠️ Convention du grand livre : un DÉBIT est NÉGATIF (crédits > 0).
+      // L'ancien code inserait un montant POSITIF pour un appel GSM : les
+      // totaux « dépenses » et « appels » du portefeuille étaient alors faux
+      // (dépense du jour à 0, total d'appels négatif).
       const txRef = 'CALL-' + callId.slice(0, 8).toUpperCase();
       await t.run(
         `INSERT INTO transactions
-           (id, user_id, type, amount_cents, method, reference, created_at)
-         VALUES (?, ?, 'call_debit', ?, 'system', ?, ?)`,
-        [uid('tx'), userId, debitCents, txRef, now()]
+           (id, user_id, type, amount_cents, method, reference, status, created_at)
+         VALUES (?, ?, 'call_debit', ?, 'system', ?, 'confirmed', ?)`,
+        [uid('tx'), userId, -debitCents, txRef, now()]
       );
 
       // Libération de la réservation si elle existe

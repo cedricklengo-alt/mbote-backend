@@ -1,5 +1,0 @@
-node_modules/
-.env
-mbote.db
-mbote.db-shm
-mbote.db-wal

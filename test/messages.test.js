@@ -200,6 +200,27 @@ const jsonBody = (buf) => ({
     })(), 'conservé côté API (lu au rechargement)');
 
     // ─────────────────────────────────────────────────────────────
+    console.log('\n4 bis. « Reçu » quand le proche était hors ligne');
+    // Didier existe mais n'a AUCUNE connexion WebSocket : il est hors ligne.
+    const D = await login(`+2438203${suffix}`, 'Didier');
+    const rD = await call('POST', '/messages/send', {
+      token: A.token, body: { to: D.phone, text: 'Tu es là ?', client_id: 'off-1' },
+    });
+    ok('message envoyé à un proche hors ligne', rD.status === 201, rD.status);
+    ok('état initial « envoyé » (non reçu)', rD.data.status === 'sent', rD.data.status);
+    a.clear();
+    const convD = await call('GET', `/messages/with/${encodeURIComponent(A.phone)}`, { token: D.token });
+    ok('Didier ouvre la conversation', convD.status === 200, convD.status);
+    const evtDelivered = await a.wait('msg');
+    ok('l’expéditeur reçoit « delivered »', !!evtDelivered && evtDelivered.kind === 'delivered',
+       evtDelivered);
+    ok('« delivered » porte l’identifiant', evtDelivered && evtDelivered.msg_id === rD.data.id,
+       evtDelivered && evtDelivered.msg_id);
+    const convOff = await call('GET', `/messages/with/${encodeURIComponent(D.phone)}`, { token: A.token });
+    const mD = (convOff.data.items || []).find(m => m.id === rD.data.id);
+    ok('statut passé à « delivered »', mD && mD.status === 'delivered', mD && mD.status);
+
+    // ─────────────────────────────────────────────────────────────
     console.log('\n5. Conversation et pagination');
     for (let i = 0; i < 54; i++) {
       await call('POST', '/messages/send', {

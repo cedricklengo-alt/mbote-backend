@@ -12,6 +12,7 @@ const PACKS = {
     name: 'English',
     strings: {
       hello: 'Mbote!',
+      you: 'You',
       my_credit: 'MY CREDIT',
       min_to_drc: 'min to DRC',
       topup: '+ Top up',

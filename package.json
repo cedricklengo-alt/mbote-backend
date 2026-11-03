@@ -6,9 +6,14 @@
   "scripts": {
     "start": "node src/seed.js && node src/server.js",
     "seed": "node src/seed.js",
-    "test": "node test/api_smoke.test.js && node test/group_signaling.test.js",
+    "test": "node test/db_tx.test.js && node test/api_smoke.test.js && node test/group_signaling.test.js && node test/feed.test.js && node test/calls.test.js && node test/messages.test.js && node test/billing_referral.test.js && node test/wallet.test.js && node test/shop.test.js && node test/twilio_sms.test.js",
     "test:api": "node test/api_smoke.test.js",
-    "test:groupe": "node test/group_signaling.test.js"
+    "test:groupe": "node test/group_signaling.test.js",
+    "test:wallet": "node test/wallet.test.js",
+    "test:shop": "node test/shop.test.js",
+    "test:db": "node test/db_tx.test.js",
+    "test:billing": "node test/billing_referral.test.js",
+    "test:twilio": "node test/twilio_sms.test.js"
   },
   "dependencies": {
     "better-sqlite3": "^12.11.1",

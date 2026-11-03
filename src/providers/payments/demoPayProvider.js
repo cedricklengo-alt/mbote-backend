@@ -20,7 +20,8 @@ module.exports = {
 
   async checkStatus(payment) {
     if (Date.now() - payment.created_at < CONFIRM_DELAY_MS) return 'pending';
-    if (payment.phone.endsWith('0001')) return 'failed'; // cas de test
+    // Carte bancaire : pas de numéro payeur — on ne doit pas planter.
+    if (payment.phone && String(payment.phone).endsWith('0001')) return 'failed'; // cas de test
     return 'success';
   },
 };

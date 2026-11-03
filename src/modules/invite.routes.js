@@ -4,6 +4,12 @@
  * POST /api/invite                     — générer un token d'invitation (requiert auth)
  * GET  /invite/:token                  — redirect vers l'app ou le store (public)
  * GET  /api/invite/validate/:token     — valider un token post-install (requiert auth)
+ *
+ * Ce routeur est monté DEUX fois (voir server.js) : sous /api/invite et sous
+ * /invite. Les chemins ci-dessous sont donc relatifs à ces deux préfixes :
+ *   POST /                 (→ /api/invite)
+ *   GET  /validate/:token  (→ /api/invite/validate/:token)
+ *   GET  /:token           (→ /invite/:token)
  */
 const router = require('express').Router();
 const { requireAuth } = require('../middleware/auth');
@@ -17,7 +23,7 @@ const ANDROID_PKG    = process.env.ANDROID_PKG   || 'com.mbote.app';
 const IOS_URL        = process.env.IOS_URL        || 'https://apps.apple.com/app/mbote/id0';
 
 /* Génère un token sécurisé et le stocke */
-router.post('/api/invite', requireAuth, async (req, res) => {
+router.post('/', requireAuth, async (req, res) => {
   try {
     const user = req.user;
     const refCode = await referralSvc.ensureCode(user.id);
@@ -83,7 +89,7 @@ router.get('/:token', async (req, res) => {
 });
 
 /* Valide le token côté Flutter après installation */
-router.get('/api/invite/validate/:token', requireAuth, async (req, res) => {
+router.get('/validate/:token', requireAuth, async (req, res) => {
   try {
     const { token } = req.params;
     const row = await db.get(

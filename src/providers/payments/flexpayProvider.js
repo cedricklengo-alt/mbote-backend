@@ -30,26 +30,40 @@ module.exports = {
   name: 'flexpay',
 
   async initiate(payment) {
+    // type 1 = Mobile Money (USSD Push) · type 2 = carte bancaire (page
+    // de paiement hébergée par FlexPay, à laquelle on redirige l'utilisateur).
+    const isCard = String(payment.method || '').toLowerCase() === 'card';
+
     const body = {
       merchant: process.env.FLEXPAY_MERCHANT,
-      type: 1, // 1 = Mobile Money (USSD Push), 2 = carte bancaire
-      phone: payment.phone.replace('+', ''), // format attendu : 243XXXXXXXXX
+      type: isCard ? 2 : 1,
       reference: payment.reference,
       amount: (payment.amount_cents / 100).toFixed(2),
       currency: payment.currency || 'USD',
       callbackUrl: `${process.env.PUBLIC_URL || ''}/api/payments/webhook`,
     };
+    // Le numéro payeur n'existe pas pour une carte : ne jamais envoyer un
+    // champ `phone` vide ou null au fournisseur.
+    if (!isCard && payment.phone) body.phone = String(payment.phone).replace('+', '');
 
     const res = await fetch(`${BASE()}/api/rest/v1/paymentService`, {
       method: 'POST', headers: headers(), body: JSON.stringify(body),
     });
     const data = await res.json().catch(() => ({}));
 
-    // code '0' = demande acceptée, USSD Push envoyé au client
+    // code '0' = demande acceptée (USSD Push envoyé, ou page carte prête)
     if (String(data.code) !== '0') {
       throw new Error(`FlexPay a refusé le paiement : ${data.message || res.status}`);
     }
-    return { order_number: data.orderNumber };
+
+    // FlexPay renvoie l'URL de la page de paiement pour les cartes.
+    const redirect = data.url || data.redirect_url || data.redirectUrl || null;
+    if (isCard && !redirect) {
+      // Sans URL, l'utilisateur ne peut pas payer : on échoue explicitement
+      // plutôt que d'afficher un paiement « en attente » éternel.
+      throw new Error('FlexPay n’a pas renvoyé d’URL de paiement par carte');
+    }
+    return { order_number: data.orderNumber, redirect_url: redirect };
   },
 
   async checkStatus(payment) {

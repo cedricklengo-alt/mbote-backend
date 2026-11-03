@@ -231,6 +231,31 @@ async function getThreads(req, res) {
 }
 router.get('/threads', requireAuth, ah(getThreads));
 
+/**
+ * 📬 Le destinataire ouvre la conversation : les messages qu'il n'avait pas
+ * encore REÇUS (son app était fermée au moment de l'envoi) passent de
+ * « envoyé » à « reçu », et l'expéditeur est prévenu en direct.
+ * Sans cela, le double ✓ « reçu » n'apparaissait qu'au marquage « lu ».
+ */
+async function markDeliveredFrom(peer, me) {
+  const rows = await db.all(
+    `SELECT id FROM messages
+      WHERE sender_id = ? AND recipient_id = ? AND delivered_at IS NULL AND deleted_at IS NULL`,
+    [peer.id, me.id],
+  );
+  if (!rows.length) return;
+  await db.run(
+    'UPDATE messages SET delivered_at = ? WHERE sender_id = ? AND recipient_id = ? AND delivered_at IS NULL',
+    [now(), peer.id, me.id],
+  );
+  for (const m of rows) {
+    rtcWs.sendTo(peer.phone, {
+      type: 'msg', kind: 'delivered', msg_id: m.id,
+      from: me.phone, from_phone: me.phone,
+    });
+  }
+}
+
 async function getConversation(req, res) {
   const peer = await getPeer(req.params.phone);
   if (!peer || peer.status === 'blocked' || peer.id === req.user.id)
@@ -238,6 +263,9 @@ async function getConversation(req, res) {
   const before = req.query.before == null ? null : Number(req.query.before);
   if (before != null && (!Number.isSafeInteger(before) || before < 0))
     return res.status(400).json({ error: 'Curseur invalide' });
+
+  // Ouverture du fil = réception implicite (accusé « reçu »).
+  await markDeliveredFrom(peer, req.user);
   const params = [req.user.id, peer.id, peer.id, req.user.id, req.user.id];
   let beforeSql = '';
   if (before != null) { beforeSql = ' AND m.created_at < ?'; params.push(before); }
