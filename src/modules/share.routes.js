@@ -221,7 +221,7 @@ ${imageAbsolue ? `<meta property="og:image" content="${esc(imageAbsolue)}">
     ${v.texte ? `<p class="texte">${esc(v.texte)}</p>` : ''}
     <p class="lien">${esc(v.lien)}</p>
     <a class="bouton" href="mbote://post/${esc(v.lien.split('/').pop())}">Ouvrir dans MboteCall</a>
-    <a class="secondaire" href="${esc(v.racine)}/">Découvrir MboteCall</a>
+    <a class="secondaire" href="${esc(v.racine)}/">Application non installée ? Découvrir MboteCall</a>
   </div>
   <div class="pied">Aperçu d’une publication publique. L’application affiche le fil complet.</div>
 </div>
