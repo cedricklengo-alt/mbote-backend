@@ -61,6 +61,11 @@ const src = fs.readFileSync(path.join(__dirname, '..', 'src', 'services', 'lokot
 ok('« y compris les emojis » n’est plus demandé', !/y compris les emojis/.test(src));
 ok('la consigne interdit explicitement les emojis', /n'utilise AUCUN emoji/.test(src));
 ok('la traduction des notes vocales est nettoyée', /sansEmoji\(translation\)/.test(src));
+
+const routes = fs.readFileSync(
+  path.join(__dirname, '..', 'src', 'modules', 'messages.routes.js'), 'utf8');
+ok('le filtre s’applique aussi à l’AFFICHAGE (anciennes traductions en base)',
+  /translation: deleted \? '' : sansEmoji\(row\.translation\)/.test(routes));
 const nbNettoyages = (src.match(/sansEmoji\(translation\)/g) || []).length;
 ok('les deux chemins (message et note vocale) sont nettoyés', nbNettoyages === 2, nbNettoyages);
 

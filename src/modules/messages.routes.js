@@ -9,6 +9,7 @@ const { requireAuth } = require('../middleware/auth');
 const rtcWs = require('./rtc.ws');
 const push = require('../services/push');
 const lokotatr = require('../services/lokota');
+const { sansEmoji } = lokotatr;
 
 
 const router = express.Router();
@@ -38,7 +39,10 @@ function forClient(row, userId) {
     kind: deleted ? 'deleted' : kind,
     mine: row.sender_id === userId,
     body: deleted ? '' : (row.body || ''),
-    translation: deleted ? '' : (row.translation || ''),
+    // Filtre à l'AFFICHAGE en plus du filtre à l'écriture : les traductions
+    // enregistrées avant le correctif gardaient leurs emojis, et elles
+    // seraient restées visibles pour toujours.
+    translation: deleted ? '' : sansEmoji(row.translation),
     transcript: deleted ? '' : (row.transcript || ''),
     lang_from: row.lang_from,
     lang_to: row.lang_to,
