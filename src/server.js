@@ -224,6 +224,16 @@ db.init().then(() => {
     .then((n) => { if (n > 0) console.log(`✅ Catalogue boutique initialisé (${n} forfaits)`); })
     .catch((e) => console.error('catalogue :', e.message));
 
+  // 🧹 FIL DE PUBLICATIONS : harmonisation des données héritées.
+  // Une visibilité écrite « communauté » (accentuée) ou dans une autre forme
+  // Unicode ne correspondait à aucune comparaison SQL → publication invisible
+  // pour tout le monde, sauf son auteur. On ramène ces valeurs à leur forme
+  // canonique, et on récupère les mots-clés des publications antérieures.
+  // Idempotent, non bloquant : un fil à ranger ne retarde pas le démarrage.
+  require('./services/feed_migration').harmoniserFil()
+    .then((r) => { if (!r) console.log('🧹 Fil : harmonisation partielle, on continue.'); })
+    .catch((e) => console.error('fil :', e.message));
+
   rtcWs.init(server);           // ← WebSocket RTC (appels + présence + groupes)
   server.listen(PORT, '0.0.0.0', () => {
     console.log(`✅ MBOTE! backend démarré sur le port ${PORT}`);

@@ -487,6 +487,30 @@ const MIGRATIONS = [
      ON sms_messages(user_id, client_id)`,
   `CREATE INDEX IF NOT EXISTS idx_sms_user ON sms_messages(user_id, created_at)`,
   `CREATE INDEX IF NOT EXISTS idx_sms_sid ON sms_messages(provider_sid)`,
+
+  // ── v3.4 FIL DE PUBLICATIONS — découverte (vues, abonnements, mots-clés) ──
+  `ALTER TABLE posts ADD COLUMN vues INTEGER DEFAULT 0`,
+  `CREATE TABLE IF NOT EXISTS post_views (
+     post_id    TEXT NOT NULL,
+     user_id    TEXT NOT NULL REFERENCES users(id),
+     created_at INTEGER NOT NULL,
+     PRIMARY KEY (post_id, user_id)
+   )`,
+  `CREATE TABLE IF NOT EXISTS follows (
+     follower_id TEXT NOT NULL REFERENCES users(id),
+     followee_id TEXT NOT NULL REFERENCES users(id),
+     created_at  INTEGER NOT NULL,
+     PRIMARY KEY (follower_id, followee_id)
+   )`,
+  `CREATE TABLE IF NOT EXISTS post_tags (
+     post_id TEXT NOT NULL,
+     tag     TEXT NOT NULL,
+     PRIMARY KEY (post_id, tag)
+   )`,
+  `CREATE INDEX IF NOT EXISTS idx_post_tags_tag ON post_tags(tag)`,
+  `CREATE INDEX IF NOT EXISTS idx_post_views_post ON post_views(post_id)`,
+  `CREATE INDEX IF NOT EXISTS idx_follows_followee ON follows(followee_id)`,
+  `CREATE INDEX IF NOT EXISTS idx_posts_created ON posts(created_at)`,
 ];
 
 
