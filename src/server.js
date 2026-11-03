@@ -202,8 +202,15 @@ db.init().then(() => {
   // Sans le gestionnaire de jetons invalides, un appareil désinstallé
   // recevait des envois en échec pour toujours.
   const push = require('./services/push');
-  push.setInvalidTokenHandler((tk) =>
-    db.run('UPDATE users SET fcm_token = NULL WHERE fcm_token = ?', [tk]));
+  // 🧹 Jeton refusé par FCM (404 NOT_FOUND / UNREGISTERED) : on l'efface des
+  // DEUX sources. Seule l'ancienne colonne était nettoyée jusqu'ici, alors que
+  // l'application enregistre ses jetons dans `device_tokens` : le jeton mort y
+  // restait et chaque envoi échouait de nouveau — d'où la répétition de
+  // « ⚠️ Envoi push call KO : 404 NOT_FOUND » dans les journaux Render.
+  push.setInvalidTokenHandler(async (tk) => {
+    await db.run('UPDATE users SET fcm_token = NULL WHERE fcm_token = ?', [tk]);
+    await db.run('DELETE FROM device_tokens WHERE token = ?', [tk]);
+  });
   push.init();
 
   // 🧹 Purge périodique des contenus livrés (confidentialité, rétention).

@@ -563,8 +563,19 @@ async function onMessage(ws, user, raw) {
   const callId = String(msg.call_id || '');
   const call = calls.get(callId);
   let to = normalizePhone(msg.to);
+
+  // 🗒️ Journal : le destinataire réel est résolu PLUS BAS (à partir de l'appel
+  // suivi). L'ancienne ligne affichait « → null ✗ hors ligne » dès que le
+  // client n'envoyait pas `to` dans son message `ringing`, ce qui faisait
+  // croire à un échec alors que le message était bien routé.
+  const cible = call
+    ? (user.phone === call.caller ? call.callee : call.caller)
+    : to;
+  const etat = call
+    ? (cible && online.has(cible) ? '✓' : '✗ hors ligne')
+    : ' (appel inconnu du standardiste)';
   if (type !== 'ice') {
-    log(`📨 WS ${type} : ${user.phone} → ${to} ${to && online.has(to) ? '✓' : '✗ hors ligne'}`);
+    log(`📨 WS ${type} : ${user.phone} → ${cible ?? '?'} ${etat}`);
   }
 
   if (type === 'offer') { await onOffer(ws, user, msg, to); return; }
