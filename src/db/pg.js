@@ -508,6 +508,52 @@ CREATE INDEX IF NOT EXISTS idx_post_tags_tag ON post_tags(tag);
 CREATE INDEX IF NOT EXISTS idx_post_views_post ON post_views(post_id);
 CREATE INDEX IF NOT EXISTS idx_follows_followee ON follows(followee_id);
 CREATE INDEX IF NOT EXISTS idx_posts_created ON posts(created_at);
+-- v3.7 SOCIAL — identifiant public (@pseudo), abonnements aux hashtags,
+-- mentions et notifications internes.
+ALTER TABLE users ADD COLUMN IF NOT EXISTS handle TEXT;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_users_handle ON users(handle);
+
+/* Abonnements aux mots-clés : « suivre #MboteCall » fait remonter les
+ * publications qui le portent. */
+CREATE TABLE IF NOT EXISTS hashtag_follows (
+  user_id    TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  tag        TEXT NOT NULL,
+  created_at BIGINT NOT NULL,
+  PRIMARY KEY (user_id, tag)
+);
+CREATE INDEX IF NOT EXISTS idx_hashtag_follows_tag ON hashtag_follows(tag);
+
+/* Mentions résolues : une ligne par personne réellement mentionnée, quelle que
+ * soit la source (publication, commentaire, statut). Sert aux notifications, au
+ * profil « mentions reçues » et aux statistiques — sans relire le texte. */
+CREATE TABLE IF NOT EXISTS mentions (
+  source_type TEXT NOT NULL,
+  source_id   TEXT NOT NULL,
+  user_id     TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  handle      TEXT NOT NULL,
+  created_at  BIGINT NOT NULL,
+  PRIMARY KEY (source_type, source_id, user_id)
+);
+CREATE INDEX IF NOT EXISTS idx_mentions_user ON mentions(user_id);
+CREATE INDEX IF NOT EXISTS idx_mentions_source ON mentions(source_type, source_id);
+
+/* Notifications internes (boîte de réception de l'application). */
+CREATE TABLE IF NOT EXISTS notifications (
+  id          TEXT PRIMARY KEY,
+  user_id     TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  sender_id   TEXT,
+  type        TEXT NOT NULL,
+  post_id     TEXT,
+  comment_id  TEXT,
+  source_type TEXT,
+  source_id   TEXT,
+  texte       TEXT,
+  lu          INTEGER NOT NULL DEFAULT 0,
+  created_at  BIGINT NOT NULL,
+  UNIQUE (user_id, type, source_type, source_id)
+);
+CREATE INDEX IF NOT EXISTS idx_notifications_user ON notifications(user_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_notifications_non_lues ON notifications(user_id, lu);
 `;
 
 

@@ -5,6 +5,7 @@
 const express = require('express');
 const crypto = require('crypto');
 const db = require('../db');
+const social = require('../services/social');
 const { uid, now, normalizePhone, ah } = require('../util');
 const { sign, requireAuth } = require('../middleware/auth');
 const referral = require('../services/referral');
@@ -100,7 +101,13 @@ r.post('/verify-otp', limitOtpTry, ah(async (req, res) => {
   res.json({
     token: sign(user),
     is_new: isNew,
-    user: { id: user.id, phone: user.phone, name: user.name, country: user.country },
+    // `handle` : identifiant public (@cedrick), attribué ici s'il manque encore
+    // — un compte neuf est immédiatement mentionnable.
+    user: {
+      id: user.id, phone: user.phone, name: user.name, country: user.country,
+      avatar: user.avatar || null,
+      handle: await social.handleDe(user.id),
+    },
     balance_cents: wallet.balance_cents,
   });
 }));
@@ -164,6 +171,7 @@ r.get('/me', requireAuth, ah(async (req, res) => {
       name: req.user.name,
       country: req.user.country,
       avatar: req.user.avatar || null,
+      handle: await social.handleDe(req.user.id),
       presence_visible: req.user.presence_visible !== 0,
       notifications_enabled: req.user.notifications_enabled !== 0,
     },

@@ -38,6 +38,11 @@ const path    = require('path');
 const fs      = require('fs');
 const { uid, now, ah } = require('../util');
 const videoThumb = require('../services/video_thumb');
+const social    = require('../services/social');
+const limites   = require('../services/limites');
+const texteSocial = require('../services/texte_social');
+const ia          = require('../services/ia_suggestions');
+const { profilDeLecture, trierPersonnalise } = require('../services/feed_rules');
 const {
   canoniserVisibilite, canoniserDuree, extraireTags, normaliserTag,
   predicatVisibilite, predicatDecouverte, predicatNonExpire, trierParInteret,
@@ -122,6 +127,26 @@ async function enrichir(posts, userId) {
     tagsParPost.get(l.post_id).push(l.tag);
   }
 
+  // Personnes mentionnées : l'application doit pouvoir ouvrir leur profil
+  // d'un appui, sans relire le texte.
+  const mentionsLignes = await db.all(
+    `SELECT m.source_id, m.user_id, m.handle, u.name, u.avatar
+       FROM mentions m JOIN users u ON u.id = m.user_id
+      WHERE m.source_type = 'post' AND m.source_id IN (${trous})
+      ORDER BY m.handle`, ids);
+  const mentionsParPost = new Map();
+  for (const m of mentionsLignes) {
+    if (!mentionsParPost.has(m.source_id)) mentionsParPost.set(m.source_id, []);
+    mentionsParPost.get(m.source_id).push({
+      id: m.user_id, handle: m.handle, name: m.name || '', avatar: m.avatar || null,
+    });
+  }
+
+  // Hashtags que JE suis : ils pèsent dans le classement du fil « Pour toi ».
+  const suivisLignes = await db.all(
+    'SELECT tag FROM hashtag_follows WHERE user_id = ?', [userId]);
+  const tagsSuivis = new Set(suivisLignes.map((t) => String(t.tag)));
+
   const auteurs = [...new Set(posts.map((p) => String(p.user_id)))];
   const trousAuteurs = auteurs.map(() => '?').join(',');
   const suivis = await db.all(
@@ -129,17 +154,24 @@ async function enrichir(posts, userId) {
     [userId, ...auteurs]);
   const estSuivi = new Set(suivis.map((s) => String(s.followee_id)));
 
-  return posts.map((p) => ({
+  return posts.map((p) => {
+    const tags = tagsParPost.get(p.id) || [];
+    const suivis = tags.filter((t) => tagsSuivis.has(String(t)));
+    return {
     ...p,
     vues: Number(p.vues || 0),
     // 🔗 Partage : l'application n'a pas à fabriquer le lien elle-même, sinon
     // un changement de domaine laisserait des liens morts dans les conversations.
     partages: Number(p.shares || 0),
     share_url: lienPublic(p.id),
-    tags: tagsParPost.get(p.id) || [],
+    tags,
+    // Hashtags de cette publication que je suis : le fil les met en avant.
+    tags_suivis: suivis,
+    mentions: mentionsParPost.get(p.id) || [],
     suivi: estSuivi.has(String(p.user_id)) ? 1 : 0,
     a_moi: String(p.user_id) === String(userId) ? 1 : 0,
-  }));
+    };
+  });
 }
 
 /** Enregistre les mots-clés d'une publication (idempotent). */
@@ -281,6 +313,226 @@ r.get('/following', requireAuth, ah(async (req, res) => {
   });
 }));
 
+// ─── GET /api/feed/pourtoi ───────────────────────────────────────────────────
+// Fil « Pour toi » : mêmes règles de visibilité que le fil, mais classé par
+// affinité plutôt que par date.
+//
+//   intérêt de base (j'aime, commentaires, vues, partages, fraîcheur)
+//   × hashtags que JE suis         ← choix volontaire, poids le plus fort
+//   × auteurs que JE suis
+//   × ma ville
+//
+// Les candidats sont pris sur les 14 derniers jours (300 au maximum) : classer
+// tout l'historique à chaque ouverture coûterait cher pour un gain nul, une
+// publication de l'an dernier n'a plus d'intérêt de fraîcheur.
+r.get('/pourtoi', requireAuth, ah(async (req, res) => {
+  const userId = req.user.id;
+  const limite = Math.min(Number(req.query.limit) || 20, 50);
+  const t = now();
+  const fenetre = t - 14 * 24 * 60 * 60 * 1000;
+
+  const sel = selectPosts(userId);
+  const vis = predicatVisibilite(userId, req.user.phone);
+  const exp = predicatNonExpire(t);
+
+  const candidats = await db.all(`${sel.sql}
+    WHERE ${vis.sql} AND ${exp.sql} AND p.created_at >= ?
+    ORDER BY p.created_at DESC
+    LIMIT 300`, [...sel.params, ...vis.params, ...exp.params, fenetre]);
+
+  const enrichis = await enrichir(candidats, userId);
+
+  const tagsSuivis = (await db.all(
+    'SELECT tag FROM hashtag_follows WHERE user_id = ?', [userId])).map((x) => x.tag);
+  const auteursSuivis = (await db.all(
+    'SELECT followee_id FROM follows WHERE follower_id = ?', [userId])).map((x) => x.followee_id);
+  const moi = await db.get('SELECT ville FROM users WHERE id = ?', [userId]).catch(() => null);
+  const profil = profilDeLecture({
+    tagsSuivis, auteursSuivis, ville: (moi && moi.ville) || '',
+  });
+
+  const classes = trierPersonnalise(enrichis, t, profil).map((p) => ({
+    ...p,
+    // Ce qui a fait remonter cette publication : l'application peut l'expliquer
+    // (« parce que tu suis #TechAfrique »), comme le font les autres réseaux.
+    raison: (p.tags_suivis && p.tags_suivis.length)
+      ? `hashtag:${p.tags_suivis[0]}`
+      : (profil.auteursSuivis.has(String(p.user_id)) ? 'auteur_suivi' : null),
+  }));
+
+  const offset = Math.max(0, Number(req.query.offset) || 0);
+  const items = classes.slice(offset, offset + limite);
+
+  res.json({
+    posts: items,
+    abonnements: { hashtags: tagsSuivis.length, auteurs: auteursSuivis.length },
+    next: offset + limite < classes.length ? { offset: offset + limite } : null,
+  });
+}));
+
+// ─── HASHTAGS ───────────────────────────────────────────────────────────────
+// Un hashtag est une adresse : il mène à une page, il s'abonne, il se compte.
+// Les trois routes ci-dessous portent l'autocomplétion, l'abonnement et la
+// liste des hashtags suivis. Elles sont déclarées AVANT `/tags/:tag`, sinon
+// « /tags/followed » serait pris pour un hashtag nommé « followed ».
+
+/**
+ * Nombre de publications et tendance d'un hashtag.
+ * `croissance` compare les 24 dernières heures aux 24 heures précédentes :
+ * c'est ce qui distingue une tendance qui monte d'un vieux succès.
+ */
+async function statsTag(tag, maintenant = now()) {
+  const jour = 24 * 60 * 60 * 1000;
+  const ligne = await db.get(`
+    SELECT
+      COUNT(*) AS publications,
+      SUM(CASE WHEN p.created_at >= ? THEN 1 ELSE 0 END) AS recentes,
+      SUM(CASE WHEN p.created_at >= ? AND p.created_at < ? THEN 1 ELSE 0 END) AS precedentes,
+      SUM(COALESCE(p.likes, 0) + COALESCE(p.comments, 0) * 2 + COALESCE(p.shares, 0) * 3) AS engagement
+    FROM post_tags pt
+    JOIN posts p ON p.id = pt.post_id
+    WHERE pt.tag = ? AND p.visibilite = 'public'`,
+  [maintenant - jour, maintenant - 2 * jour, maintenant - jour, tag]);
+
+  const abonnes = await db.get(
+    'SELECT COUNT(*) AS n FROM hashtag_follows WHERE tag = ?', [tag]);
+
+  const publications = Number(ligne && ligne.publications) || 0;
+  const recentes = Number(ligne && ligne.recentes) || 0;
+  const precedentes = Number(ligne && ligne.precedentes) || 0;
+  const engagement = Number(ligne && ligne.engagement) || 0;
+
+  // Croissance : rapport entre les deux dernières journées, borné pour rester
+  // lisible (+100 % au maximum, -100 % au minimum).
+  let croissance = 0;
+  if (precedentes > 0) croissance = (recentes - precedentes) / precedentes;
+  else if (recentes > 0) croissance = 1;
+  croissance = Math.max(-1, Math.min(1, croissance));
+
+  return {
+    tag,
+    publications,
+    abonnes: Number(abonnes && abonnes.n) || 0,
+    engagement,
+    recentes,
+    croissance: Math.round(croissance * 100) / 100,
+    // « Tendance » : du volume, récent, et qui ne recule pas.
+    tendance: publications >= 1 && recentes >= 1 && croissance >= 0,
+    jour: recentes,
+  };
+}
+
+// GET /api/feed/tags/suggest?q=mb — autocomplétion pendant la saisie.
+// Renvoie le nom tel qu'il s'écrit chez les auteurs, le volume et la tendance.
+r.get('/tags/suggest', requireAuth, ah(async (req, res) => {
+  const q = texteSocial.cleHashtag(req.query.q || '');
+  const limite = Math.min(Number(req.query.limit) || 8, 20);
+
+  // Sans requête : les hashtags les plus présents, pour amorcer la frappe.
+  const lignes = await db.all(`
+    SELECT pt.tag AS tag, COUNT(*) AS publications,
+           MAX(p.created_at) AS derniere
+      FROM post_tags pt
+      JOIN posts p ON p.id = pt.post_id
+     WHERE p.visibilite = 'public'
+       ${q ? 'AND pt.tag LIKE ?' : ''}
+     GROUP BY pt.tag
+     ORDER BY publications DESC, derniere DESC
+     LIMIT ?`,
+  [...(q ? [`${q}%`] : []), limite]);
+
+  const suivis = new Set((await db.all(
+    'SELECT tag FROM hashtag_follows WHERE user_id = ?', [req.user.id])).map((t) => String(t.tag)));
+
+  res.json({
+    q: q || '',
+    tags: lignes.map((l) => ({
+      tag: l.tag,
+      nom: l.tag,
+      publications: Number(l.publications) || 0,
+      suivi: suivis.has(String(l.tag)) ? 1 : 0,
+      tendance: Number(l.publications) >= 3,
+    })),
+  });
+}));
+
+// GET /api/feed/tags/followed — mes hashtags suivis.
+r.get('/tags/followed', requireAuth, ah(async (req, res) => {
+  const lignes = await db.all(
+    'SELECT tag, created_at FROM hashtag_follows WHERE user_id = ? ORDER BY created_at DESC',
+    [req.user.id]);
+  const tags = [];
+  for (const l of lignes) tags.push({ ...(await statsTag(l.tag)), suivi: 1, depuis: l.created_at });
+  res.json({ tags });
+}));
+
+// POST /api/feed/tags/:tag/follow — suivre un hashtag.
+r.post('/tags/:tag/follow', requireAuth, ah(async (req, res) => {
+  const tag = texteSocial.cleHashtag(req.params.tag);
+  if (!tag) return res.status(400).json({ error: 'Hashtag invalide' });
+
+  await db.run(
+    `INSERT INTO hashtag_follows (user_id, tag, created_at) VALUES (?, ?, ?)
+     ON CONFLICT (user_id, tag) DO NOTHING`, [req.user.id, tag, now()]);
+
+  res.json({ tag, suivi: 1, ...(await statsTag(tag)) });
+}));
+
+// DELETE /api/feed/tags/:tag/follow — ne plus suivre.
+r.delete('/tags/:tag/follow', requireAuth, ah(async (req, res) => {
+  const tag = texteSocial.cleHashtag(req.params.tag);
+  if (!tag) return res.status(400).json({ error: 'Hashtag invalide' });
+
+  await db.run('DELETE FROM hashtag_follows WHERE user_id = ? AND tag = ?', [req.user.id, tag]);
+  res.json({ tag, suivi: 0, ...(await statsTag(tag)) });
+}));
+
+// GET /api/feed/tendances — tendances détaillées.
+// Classement : volume récent, croissance et engagement. `?ville=` restreint aux
+// hashtags géographiques (le nom du hashtag contient la ville).
+r.get('/tendances', requireAuth, ah(async (req, res) => {
+  const limite = Math.min(Number(req.query.limit) || 15, 40);
+  const jours  = Math.min(Number(req.query.jours) || 7, 30);
+  const depuis = now() - jours * 24 * 60 * 60 * 1000;
+  const ville  = texteSocial.cleHashtag(req.query.ville || '');
+
+  const lignes = await db.all(`
+    SELECT pt.tag AS tag, COUNT(*) AS publications,
+           SUM(COALESCE(p.likes, 0) + COALESCE(p.comments, 0) * 2 + COALESCE(p.shares, 0) * 3) AS engagement,
+           MAX(p.created_at) AS derniere
+      FROM post_tags pt
+      JOIN posts p ON p.id = pt.post_id
+     WHERE p.created_at >= ? AND p.visibilite = 'public'
+       ${ville ? 'AND pt.tag LIKE ?' : ''}
+     GROUP BY pt.tag
+     HAVING COUNT(*) >= 1
+     ORDER BY publications DESC, engagement DESC
+     LIMIT ?`,
+  [...[depuis], ...(ville ? [`%${ville}%`] : []), limite]);
+
+  const suivis = new Set((await db.all(
+    'SELECT tag FROM hashtag_follows WHERE user_id = ?', [req.user.id])).map((t) => String(t.tag)));
+
+  const tags = [];
+  for (const l of lignes) {
+    const stats = await statsTag(l.tag);
+    tags.push({
+      ...stats,
+      suivi: suivis.has(String(l.tag)) ? 1 : 0,
+      // Score de tendance : volume récent, croissance et engagement, sur une
+      // échelle bornée — sert au classement de l'affichage.
+      score: Math.round((
+        Math.log2(1 + stats.recentes) * 2 +
+        Math.max(0, stats.croissance) * 3 +
+        Math.log2(1 + stats.engagement) * 0.5
+      ) * 100) / 100,
+    });
+  }
+  tags.sort((a, b) => b.score - a.score || b.publications - a.publications);
+
+  res.json({ ville: ville || null, jours, tags });
+}));
+
 // ─── GET /api/feed/tags ──────────────────────────────────────────────────────
 // Mots-clés en tendance sur les 7 derniers jours.
 r.get('/tags', requireAuth, ah(async (req, res) => {
@@ -299,33 +551,205 @@ r.get('/tags', requireAuth, ah(async (req, res) => {
      ORDER BY publications DESC, engagement DESC
      LIMIT ?`, [depuis, limite]);
 
+  const suivis = new Set((await db.all(
+    'SELECT tag FROM hashtag_follows WHERE user_id = ?', [req.user.id])).map((t) => String(t.tag)));
+
   res.json({
     tags: tags.map((t) => ({
       tag: t.tag,
+      nom: t.tag,
       publications: Number(t.publications || 0),
       engagement: Number(t.engagement || 0),
+      suivi: suivis.has(String(t.tag)) ? 1 : 0,
+      tendance: Number(t.publications || 0) >= 3 ? 1 : 0,
     })),
   });
 }));
 
 // ─── GET /api/feed/tags/:tag ─────────────────────────────────────────────────
-// Publications portant ce mot-clé (délègue à la découverte).
+// Page du hashtag : ce que la page affiche en en-tête (publications, abonnés,
+// tendance, « je le suis ») et les publications de l'onglet demandé.
+//
+//   ?tri=recentes  (défaut)  du plus récent au plus ancien
+//   ?tri=populaires          j'aime + commentaires + partages
+//   ?tri=vidéos              clips uniquement
+//   ?tri=photos              photos uniquement
 r.get('/tags/:tag', requireAuth, ah(async (req, res) => {
-  const tag = normaliserTag(req.params.tag);
-  if (!tag) return res.status(400).json({ error: 'Mot-clé invalide' });
+  const tag = texteSocial.cleHashtag(req.params.tag);
+  if (!tag) return res.status(400).json({ error: 'Hashtag invalide' });
 
+  const tri = ['recentes', 'populaires', 'videos', 'photos'].includes(String(req.query.tri))
+    ? String(req.query.tri) : 'recentes';
+  const limite = Math.min(Number(req.query.limit) || 30, 60);
   const userId = req.user.id;
   const sel = selectPosts(userId);
   const exp = predicatNonExpire(now());
 
-  const posts = await db.all(`${sel.sql}
-    WHERE ${predicatDecouverte().sql}
-      AND ${exp.sql}
-      AND p.id IN (SELECT pt.post_id FROM post_tags pt WHERE pt.tag = ?)
-    ORDER BY p.created_at DESC
-    LIMIT 50`, [...sel.params, ...exp.params, tag]);
+  const filtres = [predicatDecouverte().sql, exp.sql,
+    'p.id IN (SELECT pt.post_id FROM post_tags pt WHERE pt.tag = ?)'];
+  const params = [...exp.params, tag];
 
-  res.json({ tag, posts: await enrichir(posts, userId) });
+  if (tri === 'videos') { filtres.push(`p.type = 'clip'`); }
+  if (tri === 'photos') { filtres.push(`p.type = 'photo'`); }
+
+  const ordre = tri === 'populaires'
+    ? 'ORDER BY (COALESCE(p.likes,0) * 3 + COALESCE(p.comments,0) * 4 + COALESCE(p.shares,0) * 5) DESC, p.created_at DESC'
+    : 'ORDER BY p.created_at DESC';
+
+  const posts = await db.all(`${sel.sql}
+    WHERE ${filtres.join(' AND ')}
+    ${ordre}
+    LIMIT ?`, [...sel.params, ...params, limite]);
+
+  const stats = await statsTag(tag);
+  const suivi = await db.get(
+    'SELECT 1 AS oui FROM hashtag_follows WHERE user_id = ? AND tag = ?', [userId, tag]);
+
+  res.json({
+    tag,
+    nom: tag,
+    publications: stats.publications,
+    abonnes: stats.abonnes,
+    croissance: stats.croissance,
+    tendance: stats.tendance ? 1 : 0,
+    suivi: suivi ? 1 : 0,
+    tri,
+    posts: await enrichir(posts, userId),
+  });
+}));
+
+// ─── SUGGESTIONS (assistées, prêtes pour l'IA) ───────────────────────────────
+// Le formulaire de publication interroge cette route pendant la frappe pour
+// proposer des hashtags pertinents. Rien n'est ajouté automatiquement.
+r.get('/suggestions', requireAuth, ah(async (req, res) => {
+  const texte = typeof req.query.texte === 'string' ? req.query.texte.slice(0, 600) : '';
+  const moi = await db.get('SELECT ville, country FROM users WHERE id = ?', [req.user.id])
+    .catch(() => null);
+
+  const [hashtags, mentions] = await Promise.all([
+    ia.suggererHashtags({
+      texte,
+      ville: (moi && moi.ville) || String(req.query.ville || ''),
+      pays: (moi && moi.country) || 'rdc',
+    }),
+    ia.suggererMentions({ texte }),
+  ]);
+
+  res.json({ texte_longueur: texte.length, hashtags, mentions, modele: ia.modeleConfigure() });
+}));
+
+// ─── MENTIONS ────────────────────────────────────────────────────────────────
+// GET /api/feed/mentions/suggest?q=ced — qui puis-je mentionner ?
+// Recherche par nom, par identifiant public, et par contact enregistré.
+r.get('/mentions/suggest', requireAuth, ah(async (req, res) => {
+  const q = String(req.query.q || '').trim().slice(0, 40);
+  const limite = Math.min(Number(req.query.limit) || 8, 20);
+  const cle = texteSocial.normaliserHandle(q) || '';
+
+  const params = [req.user.id];
+  let filtre = '';
+  if (cle) {
+    filtre = `AND (LOWER(COALESCE(u.handle, '')) LIKE ? OR LOWER(u.name) LIKE ?)`;
+    params.push(`${cle}%`, `%${q.toLowerCase()}%`);
+  }
+  params.push(limite);
+
+  const lignes = await db.all(`
+    SELECT u.id, u.name, u.handle, u.avatar, u.country,
+           CASE WHEN c.phone IS NOT NULL THEN 1 ELSE 0 END AS contact,
+           CASE WHEN f.followee_id IS NOT NULL THEN 1 ELSE 0 END AS suivi
+      FROM users u
+      LEFT JOIN contacts c ON c.user_id = ? AND c.phone = u.phone
+      LEFT JOIN follows f ON f.follower_id = ? AND f.followee_id = u.id
+     WHERE u.status = 'active' AND u.id <> ?
+       ${filtre}
+     ORDER BY contact DESC, suivi DESC, u.name
+     LIMIT ?`,
+  [params[0], params[0], params[0], ...params.slice(1)]);
+
+  res.json({
+    q,
+    personnes: lignes.map((l) => ({
+      id: l.id,
+      name: l.name || '',
+      handle: l.handle || null,
+      avatar: l.avatar || null,
+      country: l.country || null,
+      contact: Number(l.contact) || 0,
+      suivi: Number(l.suivi) || 0,
+    })),
+  });
+}));
+
+// GET /api/feed/analytique — tableau de bord social : mes hashtags (volume,
+// croissance, engagement) et mes mentions. Une seule requête pour l'écran de
+// statistiques, plutôt que cinq appels séparés.
+r.get('/analytique', requireAuth, ah(async (req, res) => {
+  const userId = req.user.id;
+  const suivis = await db.all(
+    'SELECT tag FROM hashtag_follows WHERE user_id = ? ORDER BY created_at DESC LIMIT 20',
+    [userId]);
+
+  const hashtags = [];
+  for (const l of suivis) hashtags.push({ ...(await statsTag(l.tag)), suivi: 1 });
+
+  const mesTags = await db.all(`
+    SELECT pt.tag AS tag, COUNT(*) AS publications
+      FROM post_tags pt JOIN posts p ON p.id = pt.post_id
+     WHERE p.user_id = ?
+     GROUP BY pt.tag
+     ORDER BY publications DESC
+     LIMIT 20`, [userId]);
+
+  const jour = 24 * 60 * 60 * 1000;
+  const recues = await db.get(
+    'SELECT COUNT(*) AS n FROM mentions WHERE user_id = ?', [userId]);
+  const recues24 = await db.get(
+    'SELECT COUNT(*) AS n FROM mentions WHERE user_id = ? AND created_at >= ?',
+    [userId, now() - jour]);
+
+  res.json({
+    hashtags_suivis: hashtags,
+    hashtags_publies: mesTags.map((t) => ({
+      tag: t.tag, publications: Number(t.publications) || 0,
+    })),
+    mentions: {
+      recues: Number(recues && recues.n) || 0,
+      recues_24h: Number(recues24 && recues24.n) || 0,
+    },
+  });
+}));
+
+// GET /api/feed/mentions/analytique — mes mentions : reçues, envoyées, portée.
+r.get('/mentions/analytique', requireAuth, ah(async (req, res) => {
+  const userId = req.user.id;
+  const jour = 24 * 60 * 60 * 1000;
+  const t = now();
+
+  const recues = await db.get(
+    'SELECT COUNT(*) AS n FROM mentions WHERE user_id = ?', [userId]);
+  const recues24 = await db.get(
+    'SELECT COUNT(*) AS n FROM mentions WHERE user_id = ? AND created_at >= ?', [userId, t - jour]);
+  const envoyees = await db.get(`
+    SELECT COUNT(*) AS n FROM mentions m
+     JOIN posts p ON p.id = m.source_id AND m.source_type = 'post'
+    WHERE p.user_id = ?`, [userId]);
+  // Portée : total des vues + j'aime des publications où je suis mentionné.
+  const portee = await db.get(`
+    SELECT COALESCE(SUM(COALESCE(p.vues,0)),0) AS vues,
+           COALESCE(SUM(COALESCE(p.likes,0)),0) AS likes
+      FROM mentions m JOIN posts p ON p.id = m.source_id
+     WHERE m.user_id = ? AND m.source_type = 'post'`, [userId]);
+
+  res.json({
+    recues: Number(recues && recues.n) || 0,
+    recues_24h: Number(recues24 && recues24.n) || 0,
+    envoyees: Number(envoyees && envoyees.n) || 0,
+    portee: {
+      vues: Number(portee && portee.vues) || 0,
+      likes: Number(portee && portee.likes) || 0,
+    },
+  });
 }));
 
 // ─── GET /api/feed/authors/:id ───────────────────────────────────────────────
@@ -497,15 +921,38 @@ r.post('/posts', requireAuth, ah(async (req, res) => {
     ts,
   ]);
 
-  // Mots-clés : les #hashtags du texte et les mots-clés d'événement. Ils
-  // alimentent les tendances et le filtrage par mot-clé.
+  // Hashtags : les #hashtags du texte et les mots-clés d'événement. Ils
+  // alimentent les tendances, la page du hashtag et le filtrage.
   const tags = extraireTags(texte, event_tags);
   if (tags.length) await enregistrerTags(id, tags);
+
+  // Mentions : résolues maintenant, pour notifier tout de suite et pour que
+  // l'application sache ouvrir le bon profil sans relire le texte.
+  const texteComplet = [texte, event_title, event_lieu].filter(Boolean).join(' ');
+  const mentionne = await social.enregistrerMentions({
+    sourceType: 'post',
+    sourceId: id,
+    auteurId: req.user.id,
+    auteurNom: req.user.name,
+    texte: texteComplet,
+    postId: id,
+    texteApercu: texte || event_title,
+  }).catch(() => ({ mentions: [], notifies: 0, ignores: 0 }));
 
   const sel = selectPosts(req.user.id);
   const post = await db.get(`${sel.sql} WHERE p.id = ?`, [...sel.params, id]);
   const [enrichi] = await enrichir([post], req.user.id);
-  res.status(201).json({ post: enrichi });
+  res.status(201).json({
+    post: enrichi,
+    // Ce que le serveur a réellement retenu : l'application peut prévenir
+    // (« 12 hashtags envoyés, 10 conservés ») sans deviner.
+    social: {
+      hashtags: tags.length,
+      mentions: mentionne.mentions.length,
+      mentions_ignorees: mentionne.ignores,
+      notifies: mentionne.notifies,
+    },
+  });
 }));
 
 // ─── PUT /api/feed/posts/visibilite ──────────────────────────────────────────
@@ -561,8 +1008,26 @@ r.post('/stories', requireAuth, ah(async (req, res) => {
     [id, req.user.id, media_url || null, textePropre, ts],
   );
 
+  // Un statut porte lui aussi hashtags et mentions : ce sont des éléments du
+  // texte, pas un privilège des publications.
+  const mentionne = await social.enregistrerMentions({
+    sourceType: 'story',
+    sourceId: id,
+    auteurId: req.user.id,
+    auteurNom: req.user.name,
+    texte: textePropre || '',
+    postId: id,
+    texteApercu: textePropre,
+  }).catch(() => ({ mentions: [], notifies: 0, ignores: 0 }));
+
   const story = await db.get('SELECT * FROM stories WHERE id = ?', [id]);
-  res.status(201).json({ story });
+  res.status(201).json({
+    story: {
+      ...story,
+      tags: texteSocial.extraireHashtags(textePropre || '').map((t) => t.cle),
+      mentions: mentionne.mentions,
+    },
+  });
 }));
 
 // ─── POST /api/feed/stories/:id/seen ─────────────────────────────────────────
@@ -779,6 +1244,18 @@ r.post('/posts/:id/comments', requireAuth, ah(async (req, res) => {
     );
   });
 
+  // Une mention dans un commentaire notifie comme une mention dans une
+  // publication : c'est le comportement attendu partout ailleurs.
+  const mentionne = await social.enregistrerMentions({
+    sourceType: 'comment',
+    sourceId: cmId,
+    auteurId: req.user.id,
+    auteurNom: req.user.name,
+    texte: texte.trim(),
+    postId: String(req.params.id),
+    texteApercu: texte.trim(),
+  }).catch(() => ({ mentions: [], notifies: 0, ignores: 0 }));
+
   const comment = await db.get(`
     SELECT c.*, u.name AS author_name
     FROM post_comments c
@@ -786,7 +1263,10 @@ r.post('/posts/:id/comments', requireAuth, ah(async (req, res) => {
     WHERE c.id = ?
   `, [cmId]);
 
-  res.status(201).json({ comment });
+  res.status(201).json({
+    comment: { ...comment, mentions: mentionne.mentions },
+    social: { mentions: mentionne.mentions.length, notifies: mentionne.notifies },
+  });
 }));
 
 // ─── DELETE /api/feed/posts/:id ───────────────────────────────────────────────

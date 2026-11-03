@@ -99,6 +99,11 @@ app.use('/api/admin',      require('./modules/admin.routes'));
 app.use(require('./modules/share.routes').r);
 app.use('/api/feed',       require('./modules/feed.routes'));
 app.use('/api/presence',   require('./modules/presence.routes'));
+// 🔎 Recherche universelle (`#hashtag`, `@personne`, texte) et boîte de
+// réception des notifications. Deux routeurs distincts : la recherche lit,
+// les notifications écrivent.
+app.use('/api/search',        require('./modules/search.routes'));
+app.use('/api/notifications', require('./modules/notifications.routes'));
 app.use('/api/dial-later', require('./modules/dial_later.routes'));
 
 /* ---- Modules présents mais jamais montés (corrigé) ----
@@ -259,6 +264,12 @@ db.init().then(() => {
   // pour tout le monde, sauf son auteur. On ramène ces valeurs à leur forme
   // canonique, et on récupère les mots-clés des publications antérieures.
   // Idempotent, non bloquant : un fil à ranger ne retarde pas le démarrage.
+  // Identifiants publics (@pseudo) : un compte sans identifiant ne peut pas
+  // être mentionné. L'attribution est idempotente et sans effet si tout le
+  // monde en a déjà un.
+  // (Promise : le bloc de démarrage est synchrone, on n'attend pas ici.)
+  require('./services/social').attribuerHandles()
+    .catch((e) => console.error('Identifiants publics :', e.message));
   require('./services/feed_migration').harmoniserFil()
     .then((r) => { if (!r) console.log('🧹 Fil : harmonisation partielle, on continue.'); })
     .catch((e) => console.error('fil :', e.message));

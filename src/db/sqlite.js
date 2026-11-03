@@ -515,6 +515,45 @@ const MIGRATIONS = [
   `CREATE INDEX IF NOT EXISTS idx_post_views_post ON post_views(post_id)`,
   `CREATE INDEX IF NOT EXISTS idx_follows_followee ON follows(followee_id)`,
   `CREATE INDEX IF NOT EXISTS idx_posts_created ON posts(created_at)`,
+
+  // ── v3.7 SOCIAL — identifiant public (@pseudo), abonnements aux hashtags,
+  // mentions et notifications internes ─────────────────────────────────────
+  `ALTER TABLE users ADD COLUMN handle TEXT`,
+  `CREATE UNIQUE INDEX IF NOT EXISTS idx_users_handle ON users(handle)`,
+  `CREATE TABLE IF NOT EXISTS hashtag_follows (
+     user_id    TEXT NOT NULL,
+     tag        TEXT NOT NULL,
+     created_at INTEGER NOT NULL,
+     PRIMARY KEY (user_id, tag)
+   )`,
+  `CREATE INDEX IF NOT EXISTS idx_hashtag_follows_tag ON hashtag_follows(tag)`,
+  `CREATE TABLE IF NOT EXISTS mentions (
+     source_type TEXT NOT NULL,
+     source_id   TEXT NOT NULL,
+     user_id     TEXT NOT NULL,
+     handle      TEXT NOT NULL,
+     created_at  INTEGER NOT NULL,
+     PRIMARY KEY (source_type, source_id, user_id)
+   )`,
+  `CREATE INDEX IF NOT EXISTS idx_mentions_user ON mentions(user_id)`,
+  `CREATE INDEX IF NOT EXISTS idx_mentions_source ON mentions(source_type, source_id)`,
+  `CREATE TABLE IF NOT EXISTS notifications (
+     id          TEXT PRIMARY KEY,
+     user_id     TEXT NOT NULL,
+     sender_id   TEXT,
+     type        TEXT NOT NULL,
+     post_id     TEXT,
+     comment_id  TEXT,
+     source_type TEXT,
+     source_id   TEXT,
+     texte       TEXT,
+     lu          INTEGER NOT NULL DEFAULT 0,
+     created_at  INTEGER NOT NULL,
+     UNIQUE (user_id, type, source_type, source_id)
+   )`,
+  `CREATE INDEX IF NOT EXISTS idx_notifications_user ON notifications(user_id, created_at)`,
+  `CREATE INDEX IF NOT EXISTS idx_notifications_non_lues ON notifications(user_id, lu)`,
+
 ];
 
 

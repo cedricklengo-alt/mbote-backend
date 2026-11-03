@@ -187,6 +187,59 @@ function lienPublic(id) {
   return base ? `${base}/p/${id}` : null;
 }
 
+// ─── Classement personnalisé (hashtags suivis, auteurs suivis, ville) ───────
+
+/**
+ * Profil de lecture : ce que l'utilisateur a explicitement demandé à voir.
+ *
+ * Les hashtags suivis sont le signal le plus fort, parce qu'ils sont un choix
+ * volontaire (« suis #TechAfrique »), contrairement aux j'aime qui sont un
+ * geste réflexe. La ville vient ensuite : à Kinshasa, une publication de
+ * Kinshasa intéresse plus qu'une publication de Goma.
+ *
+ * @param {{tagsSuivis?: Iterable<string>, auteursSuivis?: Iterable<string>, ville?: string}} p
+ */
+function profilDeLecture({ tagsSuivis = [], auteursSuivis = [], ville = '' } = {}) {
+  return {
+    tagsSuivis: new Set([...tagsSuivis].map((t) => String(t))),
+    auteursSuivis: new Set([...auteursSuivis].map((a) => String(a))),
+    ville: sansAccents(ville),
+  };
+}
+
+/**
+ * Score du fil « Pour toi ».
+ *
+ *   intérêt = (j'aime×3 + commentaires×4 + vues×0,5 + partages×5)
+ *             / (âge + 2)^1,4        ← ce que la publication vaut en soi
+ *           × (1 + 0,8 × hashtags suivis)   ← ce que J'AI demandé à voir
+ *           × (1 + 0,5 si auteur suivi)
+ *           × (1 + 0,3 si même ville)
+ *
+ * Le multiplicateur est borné : un hashtag suivi ne peut pas transformer une
+ * publication vide en succès, il la fait seulement remonter à qualité égale.
+ * C'est la différence entre un fil personnalisé et un fil truqué.
+ */
+function scorePersonnalise(post, maintenant, profil) {
+  const base = scoreInteret(post, maintenant);
+  const tags = Array.isArray(post.tags) ? post.tags : [];
+  const communs = profil ? tags.filter((t) => profil.tagsSuivis.has(String(t))).length : 0;
+
+  let multiplicateur = 1 + Math.min(0.8 * communs, 1.6);
+  if (profil && profil.auteursSuivis.has(String(post.user_id))) multiplicateur *= 1.5;
+  if (profil && profil.ville && sansAccents(post.ville) === profil.ville) multiplicateur *= 1.3;
+
+  return base * multiplicateur;
+}
+
+/** Trie par score personnalisé décroissant (sans modifier la liste). */
+function trierPersonnalise(posts, maintenant, profil) {
+  return [...posts]
+    .map((p) => ({ post: p, score: scorePersonnalise(p, maintenant, profil) }))
+    .sort((a, b) => b.score - a.score || Number(b.post.created_at) - Number(a.post.created_at))
+    .map((x) => x.post);
+}
+
 /** Trie par intérêt décroissant, sans modifier le tableau d'origine. */
 function trierParInteret(posts, maintenant) {
   return [...posts]
@@ -208,6 +261,9 @@ module.exports = {
   predicatNonExpire,
   scoreInteret,
   trierParInteret,
+  profilDeLecture,
+  scorePersonnalise,
+  trierPersonnalise,
   basePublique,
   lienPublic,
   TAGS_PAR_POST,
