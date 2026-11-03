@@ -90,6 +90,15 @@ r.post('/start', requireAuth, ah(async (req, res) => {
       max_sec: 3600,
       provider: 'rtc',
       free_reason: 'mbote',
+      // 🔴 Champ indispensable : l'application ne lance la voix réelle (offre
+      // WebRTC) que si `rtc_online` vaut true. Il était ABSENT de cette
+      // réponse, donc l'app basculait systématiquement dans son mode simulé
+      // (sondage de /calls/:id/status toutes les secondes) : l'appelé ne
+      // sonnait jamais et l'appel « ne passait pas ». Constaté dans les
+      // journaux Render du 3 novembre 2026.
+      // Il reste informatif : le standardiste réveille un appelé hors ligne
+      // par notification et garde l'offre en salle d'attente.
+      rtc_online: rtcWs.isOnline(to),
       callee_name: mbotePeer.name || to,
       callee_avatar: mbotePeer.avatar || null,
     });

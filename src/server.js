@@ -170,6 +170,10 @@ app.get('/api/health', (req, res) => res.json({
   // Commit réellement déployé : Render expose RENDER_GIT_COMMIT. Sans ce champ,
   // impossible de savoir si la production tourne bien le dernier code poussé.
   commit: (process.env.RENDER_GIT_COMMIT || '').slice(0, 7) || null,
+  // Projet Firebase utilisé pour les notifications : doit être le MÊME que
+  // celui de l'application (android/app/google-services.json → project_id).
+  // Sinon FCM répond 404 NOT_FOUND à chaque envoi et l'appelé ne sonne pas.
+  fcm_project: require('./services/push').projectId(),
 }));
 
 /* ---- Gestion d'erreurs ---- */

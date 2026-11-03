@@ -87,6 +87,19 @@ function init() {
 const supportsPushNow = () => fake || !!credentials();
 
 /** Le push est-il utilisable ? */
+/**
+ * Identifiant du projet Firebase utilisé pour envoyer (diagnostic).
+ * L'application Android est construite avec SON google-services.json : si le
+ * projet de l'app et celui du serveur diffèrent, FCM répond
+ * « 404 NOT_FOUND / UNREGISTERED » à chaque envoi, le jeton est effacé et
+ * l'appelé ne reçoit jamais la notification d'appel. Ce champ permet de
+ * comparer les deux côtés sans exposer de secret.
+ */
+function projectId() {
+  const c = credentials();
+  return c ? c.projectId : null;
+}
+
 function enabled() {
   if (!initialised) init();
   return supportsPushNow();
@@ -466,6 +479,7 @@ async function sendUser(userId, { data, title, body, channel = 'messages', colla
 }
 
 module.exports = {
+  projectId,
   // cycle de vie
   init, enabled, setInvalidTokenHandler, getSentLog, clearSentLog,
   // API « jeton »
