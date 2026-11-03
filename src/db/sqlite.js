@@ -490,6 +490,8 @@ const MIGRATIONS = [
 
   // ── v3.4 FIL DE PUBLICATIONS — découverte (vues, abonnements, mots-clés) ──
   `ALTER TABLE posts ADD COLUMN vues INTEGER DEFAULT 0`,
+  // 🖼️ v3.5 : miniature de la vidéo, capturée automatiquement à l'envoi
+  `ALTER TABLE posts ADD COLUMN thumb_url TEXT`,
   `CREATE TABLE IF NOT EXISTS post_views (
      post_id    TEXT NOT NULL,
      user_id    TEXT NOT NULL REFERENCES users(id),

@@ -151,10 +151,33 @@ const _upload = multer({
   },
 });
 
-app.post('/api/upload', requireAuth, _upload.single('file'), (req, res) => {
+/**
+ * Envoi d'un fichier (photo, vidéo, pièce jointe).
+ *
+ * 🖼️ Pour une VIDÉO, la miniature est capturée ici, tout de suite, sans que
+ * l'application ait à s'en occuper : le fil peut alors afficher un aperçu
+ * immédiat au lieu de faire télécharger la vidéo entière à chaque passage. La
+ * capture est faite par ffmpeg (voir services/video_thumb.js) ; si aucun
+ * décodeur n'est disponible, l'envoi réussit quand même et `thumb_url` vaut
+ * null — l'application retombe sur un simple bouton de lecture.
+ */
+app.post('/api/upload', requireAuth, _upload.single('file'), async (req, res) => {
   if (!req.file) return res.status(400).json({ error: 'Aucun fichier valide reçu' });
   const host = process.env.PUBLIC_URL || `${req.protocol}://${req.get('host')}`;
-  res.json({ url: `${host}/uploads/${req.file.filename}` });
+  const nom = req.file.filename;
+
+  let thumb = null;
+  if (require('./services/video_thumb').estVideo(nom)) {
+    const relatif = await require('./services/video_thumb').miniatureDepuisUpload(nom);
+    if (relatif) thumb = `${host}${relatif}`;
+  }
+
+  res.json({
+    url: `${host}/uploads/${nom}`,
+    // Toujours présent, éventuellement null : l'application n'a pas à deviner.
+    thumb_url: thumb,
+    type: require('./services/video_thumb').estVideo(nom) ? 'video' : 'image',
+  });
 });
 app.use('/uploads', require('express').static(uploadsDir));
 
@@ -234,6 +257,17 @@ db.init().then(() => {
     .then((r) => { if (!r) console.log('🧹 Fil : harmonisation partielle, on continue.'); })
     .catch((e) => console.error('fil :', e.message));
 
+  // 🖼️ Miniatures des vidéos déjà publiées : capture différée, bornée, et
+  // seulement si un décodeur existe. Une miniature manquante n'est jamais une
+  // raison de retarder l'ouverture du service.
+  setTimeout(() => {
+    require('./services/feed_migration').rattraperMiniatures()
+      .then((r) => {
+        if (r && r.generees) console.log(`🖼️  Miniatures rattrapées : ${r.generees}/${r.posts} vidéo(s).`);
+      })
+      .catch((e) => console.error('miniatures :', e.message));
+  }, 8000);
+
   rtcWs.init(server);           // ← WebSocket RTC (appels + présence + groupes)
   server.listen(PORT, '0.0.0.0', () => {
     console.log(`✅ MBOTE! backend démarré sur le port ${PORT}`);
@@ -243,6 +277,7 @@ db.init().then(() => {
     // Sans relais TURN, un appel entre deux téléphones sur réseau mobile ne
     // peut pas aboutir : autant le dire clairement dans les journaux.
     console.log(`   ${require('./services/ice').startupNotice()}`);
+    console.log(`   ${require('./services/video_thumb').startupNotice()}`);
   });
 }).catch((e) => {
   console.error('💥 Impossible d\'initialiser la base de données :', e);

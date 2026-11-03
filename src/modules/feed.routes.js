@@ -37,6 +37,7 @@ const { requireAuth } = require('../middleware/auth');
 const path    = require('path');
 const fs      = require('fs');
 const { uid, now, ah } = require('../util');
+const videoThumb = require('../services/video_thumb');
 const {
   canoniserVisibilite, canoniserDuree, extraireTags, normaliserTag,
   predicatVisibilite, predicatDecouverte, predicatNonExpire, trierParInteret,
@@ -59,6 +60,18 @@ async function removeUploadedFile(mediaUrl) {
     const file = path.join(__dirname, '..', '..', 'uploads', name);
     await fs.promises.unlink(file).catch(() => {});
   } catch { /* le fichier est peut-être déjà parti : sans gravité */ }
+}
+
+/**
+ * Une URL de miniature n'est acceptée que si elle ressemble à une URL http(s)
+ * ou à un chemin local `/uploads/…`. Cela évite de stocker n'importe quoi, y
+ * compris des valeurs qui seraient ensuite interprétées par le client.
+ */
+function miniatureValide(url) {
+  if (!url || typeof url !== 'string') return false;
+  const v = url.trim();
+  if (v.length < 8 || v.length > 500) return false;
+  return /^https?:\/\//i.test(v) || v.startsWith('/uploads/');
 }
 
 // ─── Sélection commune ──────────────────────────────────────────────────────
@@ -422,6 +435,7 @@ r.post('/posts', requireAuth, ah(async (req, res) => {
     event_tags,
     clip_duree_seconds,
     ville,
+    thumb_url,
   } = req.body;
 
   if (!['photo', 'clip', 'texte', 'event'].includes(type))
@@ -446,12 +460,23 @@ r.post('/posts', requireAuth, ah(async (req, res) => {
   const id = uid('po');
   const ts = now();
 
+  // 🖼️ Miniature : celle fournie par l'application (le serveur l'a produite à
+  // l'envoi du fichier), sinon on la capture ici à partir du média déjà
+  // hébergé. Une application ancienne n'envoie rien : la vidéo reçoit donc
+  // quand même son aperçu.
+  let miniature = typeof thumb_url === 'string' && thumb_url.trim()
+    ? thumb_url.trim().slice(0, 500)
+    : null;
+  if (!miniatureValide(miniature) && media_url) {
+    miniature = await videoThumb.miniaturePourUrl(media_url);
+  }
+
   await db.run(`
     INSERT INTO posts
       (id, user_id, type, origine, duree, visibilite,
        media_url, texte, event_title, event_date, event_lieu, event_tags,
-       clip_sec, ville, likes, comments, vues, created_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, 0, ?)
+       clip_sec, ville, thumb_url, likes, comments, vues, created_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, 0, ?)
   `, [
     id, req.user.id, type, origine, dur, vis,
     media_url      || null,
@@ -463,6 +488,7 @@ r.post('/posts', requireAuth, ah(async (req, res) => {
     clip_duree_seconds || null,
     // Ville facultative : sert de pastille sur la carte du fil.
     typeof ville === 'string' && ville.trim() ? ville.trim().slice(0, 80) : null,
+    miniature,
     ts,
   ]);
 
@@ -561,6 +587,33 @@ r.get('/posts/:id', requireAuth, ah(async (req, res) => {
 
   const cm = await db.get('SELECT COUNT(*) AS n FROM post_comments WHERE post_id = ?', [post.id]);
   res.json({ post: { ...enrichi, comments: Number(cm && cm.n) || 0 } });
+}));
+
+// ─── POST /api/feed/posts/:id/thumb ──────────────────────────────────────────
+// Miniature d'une vidéo déjà publiée : soit on en fournit une (`thumb_url`),
+// soit le serveur la capture maintenant à partir du média. Réservé à l'auteur.
+// C'est ce qui permet de rattraper les vidéos publiées avant l'arrivée des
+// miniatures — sans attendre qu'elles soient republiées.
+r.post('/posts/:id/thumb', requireAuth, ah(async (req, res) => {
+  const post = await db.get(
+    'SELECT id, user_id, media_url, thumb_url FROM posts WHERE id = ?', [req.params.id]);
+  if (!post) return res.status(404).json({ error: 'Publication introuvable' });
+  if (String(post.user_id) !== String(req.user.id))
+    return res.status(403).json({ error: 'Tu ne peux changer que tes publications' });
+
+  let miniature = typeof req.body?.thumb_url === 'string' ? req.body.thumb_url.trim() : null;
+  if (!miniatureValide(miniature)) miniature = null;
+  if (!miniature) miniature = await videoThumb.miniaturePourUrl(post.media_url);
+  if (!miniature) {
+    return res.status(422).json({
+      error: post.media_url
+        ? 'Impossible de produire une miniature pour ce média'
+        : 'Cette publication n’a pas de vidéo',
+    });
+  }
+
+  await db.run('UPDATE posts SET thumb_url = ? WHERE id = ?', [miniature, post.id]);
+  res.json({ id: post.id, thumb_url: miniature });
 }));
 
 // ─── POST /api/feed/posts/:id/view ───────────────────────────────────────────

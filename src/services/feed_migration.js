@@ -94,6 +94,39 @@ async function rattraperTags(limite = 2000) {
 }
 
 /**
+ * Rattrapage des miniatures vidéo.
+ *
+ * Les vidéos publiées avant l'arrivée de `thumb_url` n'ont aucun aperçu. On
+ * capture leur première image maintenant, une fois pour toutes. Volontairement
+ * borné (quelques dizaines par démarrage) : la capture vidéo coûte du processeur
+ * et un hébergement modeste ne doit pas être saturé au réveil.
+ */
+async function rattraperMiniatures(limite = 25) {
+  const videoThumb = require('./video_thumb');
+  if (!videoThumb.disponible()) return { posts: 0, generees: 0 };
+
+  const posts = await db.all(`
+    SELECT id, media_url
+      FROM posts
+     WHERE (thumb_url IS NULL OR thumb_url = '')
+       AND media_url IS NOT NULL
+       AND (LOWER(media_url) LIKE '%.mp4' OR LOWER(media_url) LIKE '%.mov'
+            OR LOWER(media_url) LIKE '%.m4v' OR LOWER(media_url) LIKE '%.webm'
+            OR LOWER(media_url) LIKE '%.3gp')
+     ORDER BY created_at DESC
+     LIMIT ?`, [limite]);
+
+  let generees = 0;
+  for (const p of posts) {
+    const miniature = await videoThumb.miniaturePourUrl(p.media_url);
+    if (!miniature) continue;
+    await db.run('UPDATE posts SET thumb_url = ? WHERE id = ?', [miniature, p.id]);
+    generees += 1;
+  }
+  return { posts: posts.length, generees };
+}
+
+/**
  * Point d'entrée appelé par `server.js` après `db.init()`.
  * Ne relance JAMAIS une exception : un fil mal rangé ne doit pas empêcher le
  * serveur de démarrer.
@@ -118,4 +151,5 @@ module.exports = {
   harmoniserVisibilites,
   harmoniserDurees,
   rattraperTags,
+  rattraperMiniatures,
 };
