@@ -99,6 +99,15 @@ const og = (html, prop) => {
       vue.html.includes(`mbote://post/${idPub}`), 'lien mbote:// absent');
     ok('le texte de la publication est affiché', vue.html.includes('Concert ce soir à Kinshasa'));
 
+    console.log('\n2 bis. Un lien sans photo montre quand même une image');
+    const pageTexte = await fetch(`${RACINE}/p/${idPub}`);
+    const htmlTexte = await pageTexte.text();
+    const imgDefaut = og(htmlTexte, 'og:image');
+    ok('og:image présente même sans photo', !!imgDefaut, imgDefaut);
+    ok('image absolue', !!imgDefaut && /^https?:\/\//.test(imgDefaut), imgDefaut);
+    ok('image de repli réellement servie',
+      !!imgDefaut && (await fetch(imgDefaut)).status === 200, imgDefaut);
+
     console.log('\n3. JSON public sans jeton');
     const json = await fetch(`${B}/feed/posts/${idPub}/public`).then((r) => r.json());
     ok('publication accessible sans jeton', !!json.post, Object.keys(json));

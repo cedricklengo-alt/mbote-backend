@@ -10,8 +10,9 @@
  *
  * Ce module fournit donc :
  *   GET /p/:id                 page web publique de la publication, avec aperçu
- *                              Open Graph (image = miniature de la vidéo ou
- *                              photo), bouton d'ouverture dans l'application et
+ *                              Open Graph (image = miniature de la vidéo, sinon
+ *                              la photo, sinon l'avatar, sinon la vignette de
+ *                              marque), bouton d'ouverture dans l'application et
  *                              repli vers la fiche de téléchargement ;
  *   GET /api/feed/posts/:id/public
  *                              la même publication en JSON, sans jeton. Sert à
@@ -64,6 +65,18 @@ async function postPublic(id) {
   return post;
 }
 
+/**
+ * Rend une adresse absolue. Les robots d'aperçu ne résolvent jamais un chemin
+ * relatif : `og:image="/uploads/x.jpg"` ne s'affiche pas.
+ */
+function absolu(url, racine) {
+  if (!url) return null;
+  const s = String(url).trim();
+  if (/^https?:\/\//i.test(s)) return s;
+  if (s.startsWith('/')) return `${racine}${s}`;
+  return null;
+}
+
 /** Lien de partage d'une publication. */
 function lienPartage(req, id) {
   return `${base(req)}/p/${id}`;
@@ -95,8 +108,14 @@ r.get('/p/:id', async (req, res, next) => {
     const description = (post.texte || post.event_title || 'Publication sur MboteCall')
       .toString().replace(/\s+/g, ' ').slice(0, 200);
 
-    // Image d'aperçu : miniature de la vidéo, sinon la photo elle-même.
-    const image = post.thumb_url || post.media_url || null;
+    // Image d'aperçu : miniature de la vidéo, sinon la photo, sinon l'avatar de
+    // l'auteur, sinon la vignette de marque. Un lien partagé doit TOUJOURS
+    // montrer une image : sans elle, l'aperçu WhatsApp se réduit à une ligne de
+    // texte grise et personne ne clique.
+    const image = absolu(post.thumb_url, racine)
+      || absolu(post.media_url, racine)
+      || absolu(post.author_avatar, racine)
+      || `${racine}/assets/og.png`;
 
     res.type('html').send(pagePublication({
       lien,
@@ -107,7 +126,7 @@ r.get('/p/:id', async (req, res, next) => {
       estVideo: post.type === 'clip',
       miniature: post.thumb_url,
       auteur: post.author_name,
-      avatar: post.author_avatar,
+      avatar: absolu(post.author_avatar, racine),
       texte: post.texte,
       type: post.type,
       evenement: post.type === 'event'

@@ -187,6 +187,8 @@ app.use('/uploads', require('express').static(uploadsDir));
 
 /* ---- Console admin (web) ---- */
 app.use('/admin', express.static(path.join(__dirname, '..', 'public', 'admin')));
+// Vignette de marque : image d'aperçu par défaut des liens partagés.
+app.use('/assets', express.static(path.join(__dirname, '..', 'public', 'assets')));
 app.get('/', (req, res) => res.redirect('/admin'));
 
 /* ---- Santé ---- */
