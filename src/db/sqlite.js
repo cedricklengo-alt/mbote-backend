@@ -209,6 +209,59 @@ CREATE TABLE IF NOT EXISTS post_comments (
 
 // Colonnes ajoutées après la V1 (ALTER sans IF NOT EXISTS en SQLite → try/catch)
 const MIGRATIONS = [
+  // 🔐 v4.0 — sessions persistantes, appareils, préférences, sécurité, audit
+  `ALTER TABLE users ADD COLUMN dial_code TEXT`,
+  `ALTER TABLE users ADD COLUMN last_login INTEGER`,
+  `ALTER TABLE users ADD COLUMN app_version TEXT`,
+  `ALTER TABLE users ADD COLUMN language TEXT`,
+  `CREATE TABLE IF NOT EXISTS sessions (
+    id            TEXT PRIMARY KEY,
+    user_id       TEXT NOT NULL REFERENCES users(id),
+    refresh_hash  TEXT NOT NULL,
+    user_agent    TEXT,
+    ip            TEXT,
+    created_at    INTEGER NOT NULL,
+    last_used_at  INTEGER,
+    expires_at    INTEGER NOT NULL,
+    revoked       INTEGER NOT NULL DEFAULT 0
+  )`,
+  `CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id, revoked)`,
+  `CREATE TABLE IF NOT EXISTS devices (
+    id           TEXT PRIMARY KEY,
+    user_id      TEXT NOT NULL REFERENCES users(id),
+    device_id    TEXT NOT NULL,
+    platform     TEXT,
+    model        TEXT,
+    app_version  TEXT,
+    fcm_token    TEXT,
+    last_seen_at INTEGER,
+    created_at   INTEGER NOT NULL,
+    UNIQUE(user_id, device_id)
+  )`,
+  `CREATE TABLE IF NOT EXISTS user_preferences (
+    user_id    TEXT PRIMARY KEY REFERENCES users(id),
+    language   TEXT DEFAULT 'fr',
+    theme      TEXT DEFAULT 'fleuve',
+    text_scale REAL DEFAULT 1.0,
+    updated_at INTEGER
+  )`,
+  `CREATE TABLE IF NOT EXISTS user_security (
+    user_id         TEXT PRIMARY KEY REFERENCES users(id),
+    pin_hash        TEXT,
+    otp_attempts    INTEGER DEFAULT 0,
+    locked_until    INTEGER DEFAULT 0,
+    updated_at      INTEGER
+  )`,
+  `CREATE TABLE IF NOT EXISTS audit_logs (
+    id         TEXT PRIMARY KEY,
+    user_id    TEXT,
+    action     TEXT NOT NULL,
+    ip         TEXT,
+    user_agent TEXT,
+    meta       TEXT,
+    created_at INTEGER NOT NULL
+  )`,
+  `CREATE INDEX IF NOT EXISTS idx_audit_user ON audit_logs(user_id, created_at)`,
   `ALTER TABLE users ADD COLUMN referral_code TEXT`,
   `ALTER TABLE users ADD COLUMN referred_by TEXT`,
   `ALTER TABLE users ADD COLUMN referral_rewarded INTEGER DEFAULT 0`,
