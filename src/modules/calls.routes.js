@@ -290,6 +290,10 @@ r.get('/history', requireAuth, ah(async (req, res) => {
   const q = String(req.query.q || '').trim().slice(0, 40);
   const limit = Math.min(200, Math.max(1, Number(req.query.limit) || 50));
   const offset = Math.max(0, Number(req.query.offset) || 0);
+  // 🔄 Synchro local-first : ne renvoyer que les appels postérieurs au curseur.
+  const since = Number(req.query.since ?? 0);
+  const sinceSql = (Number.isSafeInteger(since) && since > 0) ? 'AND c.started_at > ?' : '';
+  const sinceParams = (Number.isSafeInteger(since) && since > 0) ? [since] : [];
 
   // Une seule requête pour toutes les lignes visibles de l'utilisateur.
   // `hidden_at` : suppression « pour moi » — la ligne reste en base pour la
@@ -307,8 +311,9 @@ r.get('/history', requireAuth, ah(async (req, res) => {
               LIMIT 1) AS contact_name
      FROM calls c LEFT JOIN users u ON u.id = c.user_id
      WHERE (c.user_id = ? OR c.callee_user_id = ?) AND c.hidden_at IS NULL
+     ${sinceSql}
      ORDER BY c.started_at DESC LIMIT 500`,
-    [req.user.id, req.user.id, req.user.id, req.user.id, req.user.id]);
+    [req.user.id, req.user.id, req.user.id, req.user.id, req.user.id, ...sinceParams]);
 
   const answered = (c) => Number(c.answered_at || 0) > 0 || Number(c.billed_sec || 0) > 0;
   const isIn = (c) => String(c.direction || '') === 'incoming';
