@@ -12,6 +12,7 @@ const referral = require('../services/referral');
 const shop = require('../services/shop');
 const sms = require('../services/sms');
 const { rateLimit } = require('../middleware/ratelimit');
+const session = require('../services/session');
 
 const r = express.Router();
 const DEMO = () => String(process.env.DEMO_MODE || 'true') === 'true';
@@ -97,9 +98,30 @@ r.post('/verify-otp', limitOtpTry, ah(async (req, res) => {
 
   await shop.claimGiftPlans(user.id, user.phone);
 
+  // 🔐 v4.0 — profil enrichi + session persistante + appareil + audit
+  const dial = normalizePhone(user.phone) || phone;
+  const dialCode = String(req.body.dial_code || '').replace(/[^+\d]/g, '') || null;
+  await db.run(
+    `UPDATE users SET last_login = ?, dial_code = COALESCE(?, dial_code),
+       country = COALESCE(?, country), app_version = COALESCE(?, app_version),
+       language = COALESCE(?, language), fcm_token = COALESCE(?, fcm_token) WHERE id = ?`,
+    [now(), dialCode, req.body.country ? String(req.body.country).slice(0, 2).toUpperCase() : null,
+     req.body.app_version ? String(req.body.app_version).slice(0, 40) : null,
+     req.body.language ? String(req.body.language).slice(0, 5) : null,
+     req.body.fcm_token ? String(req.body.fcm_token).slice(0, 500) : null, user.id]
+  );
+  await db.run(
+    `INSERT INTO user_preferences(user_id, language, updated_at) VALUES(?,?,?)
+     ON CONFLICT(user_id) DO UPDATE SET language = COALESCE(excluded.language, user_preferences.language), updated_at = excluded.updated_at`,
+    [user.id, req.body.language ? String(req.body.language).slice(0, 5) : 'fr', now()]
+  );
+  const sess = await session.createSession(user, req, { isNew, device: req.body.device });
+
   const wallet = await db.get('SELECT * FROM wallets WHERE user_id = ?', [user.id]);
   res.json({
-    token: sign(user),
+    token: sess.access_token,          // rétrocompatible (app existante)
+    refresh_token: sess.refresh_token, // rotation côté client
+    session_id: sess.session_id,
     is_new: isNew,
     // `handle` : identifiant public (@cedrick), attribué ici s'il manque encore
     // — un compte neuf est immédiatement mentionnable.
@@ -109,6 +131,37 @@ r.post('/verify-otp', limitOtpTry, ah(async (req, res) => {
       handle: await social.handleDe(user.id),
     },
     balance_cents: wallet.balance_cents,
+  });
+}));
+
+/* 3) Rotation du refresh token → nouvelle paire de jetons */
+r.post('/refresh', ah(async (req, res) => {
+  const rt = String(req.body.refresh_token || '');
+  const sess = await session.rotateRefresh(rt, req);
+  if (!sess) return res.status(401).json({ error: 'Session expirée — reconnecte-toi', code: 'AUTH' });
+  res.json({ token: sess.access_token, refresh_token: sess.refresh_token, session_id: sess.session_id });
+}));
+
+/* 4) Déconnexion volontaire : révoque les sessions (refresh + actives) */
+r.post('/logout', ah(async (req, res) => {
+  const h = req.headers.authorization || '';
+  const { verifyToken } = require('../middleware/auth');
+  const payload = h.startsWith('Bearer ') ? verifyToken(h.slice(7)) : null;
+  await session.revokeRefresh(String(req.body.refresh_token || ''), payload?.uid, req);
+  res.json({ ok: true });
+}));
+
+/* 5) Validation de session au démarrage (splash → accueil direct) */
+r.get('/session', requireAuth, ah(async (req, res) => {
+  const s = await db.get(
+    'SELECT id, created_at, last_used_at, expires_at FROM sessions WHERE user_id = ? AND revoked = 0 ORDER BY created_at DESC LIMIT 1',
+    [req.user.id]
+  );
+  await db.run('UPDATE sessions SET last_used_at = ? WHERE id = ?', [now(), s?.id]);
+  res.json({
+    valid: true,
+    user: { id: req.user.id, phone: req.user.phone, name: req.user.name, country: req.user.country, avatar: req.user.avatar || null },
+    session: s || null,
   });
 }));
 
