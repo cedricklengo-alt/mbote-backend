@@ -69,10 +69,15 @@ r.post('/start', requireAuth, ah(async (req, res) => {
 
   // Les comptes Mbote s'appellent gratuitement en WebRTC. Il n'y a ni tarif
   // GSM ni provider téléphonique dans ce parcours.
-  const mbotePeer = await db.get(
-    "SELECT id, phone, name, avatar, status FROM users WHERE phone = ?",
-    [to],
-  );
+  // force_gsm=true (bouton « 2 » du clavier) : on saute ce parcours et on
+  // route volontairement vers le réseau GSM classique.
+  const forceGsm = req.body.force_gsm === true;
+  const mbotePeer = forceGsm
+    ? null
+    : await db.get(
+        "SELECT id, phone, name, avatar, status FROM users WHERE phone = ?",
+        [to],
+      );
   if (mbotePeer) {
     if (mbotePeer.status === 'blocked')
       return res.status(403).json({ error: 'Ce compte ne peut pas recevoir d’appel' });
