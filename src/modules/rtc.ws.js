@@ -31,6 +31,7 @@ const db = require('../db');
 const { normalizePhone } = require('../util');
 const { verifyToken } = require('../middleware/auth');
 const push = require('../services/push');
+const notifs = require('../services/notifs');
 
 /** téléphone → { ws, user, fg, fgAt } */
 const online = new Map();
@@ -725,6 +726,49 @@ function init(server) {
         }
       }
     }
+
+    // 🔔 Rappels de présence PERSISTÉS (table presence_reminders, créés par
+    // REST POST /contacts/:phone/reminder) : contrairement aux watches ci-dessus
+    // (en mémoire, perdus au redémarrage), ceux-ci DOIVENT se déclencher quand
+    // le contact revient en ligne, même si le serveur a redémarré entre-temps.
+    try {
+      const rems = await db.all(
+        `SELECT owner_id FROM presence_reminders WHERE target_id = ? AND notified_at IS NULL`,
+        [user.id]);
+      if (rems.length > 0) {
+        await db.run(
+          `UPDATE presence_reminders SET notified_at = ? WHERE target_id = ? AND notified_at IS NULL`,
+          [Date.now(), user.id]);
+        for (const r of rems) {
+          // 1) temps réel si le demandeur est connecté
+          for (const e of online.values()) {
+            if (e.user && e.user.id === r.owner_id) {
+              send(e.ws, { type: 'contact_online', phone: user.phone, name: user.name });
+            }
+          }
+          // 2) push FCM si le demandeur est hors ligne
+          push.primaryToken(r.owner_id).then(token => {
+            if (token) {
+              push.sendData(token, {
+                kind: 'contact_online',
+                from_phone: user.phone,
+                from_name: user.name || '',
+              }).catch(() => {});
+            }
+          }).catch(() => {});
+          // 3) notification persistante dans la boîte de réception
+          notifs.notifier({
+            receiverId: r.owner_id,
+            senderId: user.id,
+            type: notifs.TYPES.PRESENCE,
+            sourceType: 'contact',
+            sourceId: user.phone,
+            texte: `${user.name || user.phone} est de retour en ligne`,
+          }).catch(() => {});
+        }
+        log(`🔔 ${rems.length} rappel(s) de présence déclenchés pour ${user.phone}`);
+      }
+    } catch (e) { warn('⚠️ rappels présence :', e.message); }
 
     ws.on('message', (raw) => {
       onMessage(ws, user, raw).catch((e) => warn('⚠️ WS message :', e.message));
