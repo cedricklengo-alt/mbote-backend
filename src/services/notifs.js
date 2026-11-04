@@ -41,6 +41,7 @@ const TYPES = {
   MENTION: 'mention',
   SHARE: 'share',
   FOLLOW: 'follow',
+  PRESENCE: 'presence', // « X est de retour en ligne » (rappel de présence)
 };
 
 /** Types regroupés : un seul enregistrement, plusieurs auteurs. */
@@ -78,6 +79,8 @@ function messageDe({ type, nbActeurs, noms, apercu }) {
       return `${premier} vous a mentionné`;
     case TYPES.FOLLOW:
       return `${premier} vous suit maintenant`;
+    case TYPES.PRESENCE:
+      return `${premier} est de retour en ligne`;
     default:
       return apercu ? `${premier} : ${apercu}` : `${premier} a interagi avec votre contenu`;
   }
@@ -203,6 +206,7 @@ function titrePoussee(type) {
     case TYPES.MENTION: return 'Nouvelle mention';
     case TYPES.SHARE: return 'Votre publication a été partagée';
     case TYPES.FOLLOW: return 'Nouvel abonné';
+    case TYPES.PRESENCE: return 'Contact en ligne';
     default: return 'MboteCall';
   }
 }

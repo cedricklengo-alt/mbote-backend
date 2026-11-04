@@ -236,6 +236,34 @@ async function getThreads(req, res) {
 router.get('/threads', requireAuth, ah(getThreads));
 
 /**
+ * 🔄 SYNCHRO LOCAL-FIRST — messages depuis un curseur (ms epoch).
+ * Utilisé par l'app au retour de connexion pour récupérer les messages
+ * reçus hors ligne. Idempotent côté client (dédup par id / client_id).
+ * Le curseur n'est avancé par le client qu'après persistance du lot.
+ */
+async function getSince(req, res) {
+  const since = Number(req.query.since ?? 0);
+  const limit = Math.min(Number(req.query.limit ?? 200) || 200, 500);
+  if (!Number.isSafeInteger(since) || since < 0)
+    return res.status(400).json({ error: 'Curseur invalide' });
+  const rows = await db.all(`
+    SELECT m.*, u.phone AS peer_phone, u.name AS peer_name
+    FROM messages m
+    JOIN users u ON u.id = CASE WHEN m.sender_id = ? THEN m.recipient_id ELSE m.sender_id END
+    WHERE (m.sender_id = ? OR m.recipient_id = ?)
+      AND m.created_at > ?
+      AND NOT EXISTS (SELECT 1 FROM message_hidden h WHERE h.message_id = m.id AND h.user_id = ?)
+    ORDER BY m.created_at ASC, m.id ASC
+    LIMIT ?
+  `, [req.user.id, req.user.id, req.user.id, since, req.user.id, limit + 1]);
+  const hasMore = rows.length > limit;
+  const items = (hasMore ? rows.slice(0, limit) : rows)
+    .map((row) => ({ ...forClient(row, req.user.id), peer_phone: row.peer_phone, peer_name: row.peer_name, sender_id: row.sender_id, recipient_id: row.recipient_id, client_id: row.client_id }));
+  res.json({ items, has_more: hasMore, server_now: Date.now() });
+}
+router.get('/since', requireAuth, ah(getSince));
+
+/**
  * 📬 Le destinataire ouvre la conversation : les messages qu'il n'avait pas
  * encore REÇUS (son app était fermée au moment de l'envoi) passent de
  * « envoyé » à « reçu », et l'expéditeur est prévenu en direct.
