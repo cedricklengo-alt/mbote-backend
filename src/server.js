@@ -98,6 +98,7 @@ app.use('/api/admin',      require('./modules/admin.routes'));
 // (`/api/feed/posts/:id/public` et `/share`) vivent dans le module du fil.
 app.use(require('./modules/share.routes').r);
 app.use('/api/feed',       require('./modules/feed.routes'));
+app.use('/api/rank',      require('./modules/feed_ranked.routes')); // v4.1 ranking (additif)
 app.use('/api/presence',   require('./modules/presence.routes'));
 // 🔎 Recherche universelle (`#hashtag`, `@personne`, texte) et boîte de
 // réception des notifications. Deux routeurs distincts : la recherche lit,

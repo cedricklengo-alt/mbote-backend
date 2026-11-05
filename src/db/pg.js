@@ -624,6 +624,42 @@ CREATE TABLE IF NOT EXISTS notification_acteurs (
 );
 CREATE INDEX IF NOT EXISTS idx_notif_acteurs ON notification_acteurs(notification_id);
 
+-- v4.1 : moteur de ranking du fil ──────────────────────────────
+CREATE TABLE IF NOT EXISTS feed_scores (
+post_id    TEXT PRIMARY KEY REFERENCES posts(id) ON DELETE CASCADE,
+score      DOUBLE PRECISION NOT NULL DEFAULT 0,
+detail     TEXT,
+updated_at BIGINT
+);
+CREATE TABLE IF NOT EXISTS feed_events (
+id         TEXT PRIMARY KEY,
+user_id    TEXT REFERENCES users(id) ON DELETE CASCADE,
+type       TEXT NOT NULL,
+post_id    TEXT,
+meta       TEXT,
+created_at BIGINT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS post_reactions (
+id         TEXT PRIMARY KEY,
+post_id    TEXT NOT NULL REFERENCES posts(id) ON DELETE CASCADE,
+user_id    TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+type       TEXT NOT NULL,
+created_at BIGINT NOT NULL,
+UNIQUE(post_id, user_id)
+);
+CREATE TABLE IF NOT EXISTS comment_reactions (
+id         TEXT PRIMARY KEY,
+comment_id TEXT NOT NULL REFERENCES post_comments(id) ON DELETE CASCADE,
+user_id    TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+type       TEXT NOT NULL,
+created_at BIGINT NOT NULL,
+UNIQUE(comment_id, user_id)
+);
+CREATE INDEX IF NOT EXISTS idx_feed_scores_score ON feed_scores(score DESC);
+CREATE INDEX IF NOT EXISTS idx_feed_events_user ON feed_events(user_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_post_reactions_post ON post_reactions(post_id);
+CREATE INDEX IF NOT EXISTS idx_comment_reactions_comment ON comment_reactions(comment_id)
+
 `;
 
 
@@ -708,6 +744,7 @@ async function repairLegacySchema(client) {
   }
 }
 
+
 module.exports = {
   name: 'postgres',
   fn: {
@@ -724,6 +761,7 @@ module.exports = {
       max: 10,
     });
     await pool.query(SCHEMA);
+    await pool.query(`ALTER TABLE user_preferences ADD COLUMN IF NOT EXISTS interests TEXT`).catch(() => {});
     // Rattrape les bases créées avant le passage BOOLEAN → INTEGER.
     await repairLegacySchema(pool);
   },

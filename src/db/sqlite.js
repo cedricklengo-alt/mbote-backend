@@ -205,10 +205,47 @@ CREATE TABLE IF NOT EXISTS post_comments (
   texte       TEXT NOT NULL,
   created_at  INTEGER NOT NULL
 );
+-- v4.1 : moteur de ranking du fil ──────────────────────────────
+CREATE TABLE IF NOT EXISTS feed_scores (
+post_id    TEXT PRIMARY KEY REFERENCES posts(id) ON DELETE CASCADE,
+score      REAL NOT NULL DEFAULT 0,
+detail     TEXT,
+updated_at INTEGER
+);
+CREATE TABLE IF NOT EXISTS feed_events (
+id         TEXT PRIMARY KEY,
+user_id    TEXT REFERENCES users(id) ON DELETE CASCADE,
+type       TEXT NOT NULL,
+post_id    TEXT,
+meta       TEXT,
+created_at INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS post_reactions (
+id         TEXT PRIMARY KEY,
+post_id    TEXT NOT NULL REFERENCES posts(id) ON DELETE CASCADE,
+user_id    TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+type       TEXT NOT NULL,
+created_at INTEGER NOT NULL,
+UNIQUE(post_id, user_id)
+);
+CREATE TABLE IF NOT EXISTS comment_reactions (
+id         TEXT PRIMARY KEY,
+comment_id TEXT NOT NULL REFERENCES post_comments(id) ON DELETE CASCADE,
+user_id    TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+type       TEXT NOT NULL,
+created_at INTEGER NOT NULL,
+UNIQUE(comment_id, user_id)
+);
+CREATE INDEX IF NOT EXISTS idx_feed_scores_score ON feed_scores(score DESC);
+CREATE INDEX IF NOT EXISTS idx_feed_events_user ON feed_events(user_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_post_reactions_post ON post_reactions(post_id);
+CREATE INDEX IF NOT EXISTS idx_comment_reactions_comment ON comment_reactions(comment_id)
+
 `;
 
 // Colonnes ajoutées après la V1 (ALTER sans IF NOT EXISTS en SQLite → try/catch)
 const MIGRATIONS = [
+  `ALTER TABLE user_preferences ADD COLUMN interests TEXT`,
   // 🔐 v4.0 — sessions persistantes, appareils, préférences, sécurité, audit
   `ALTER TABLE users ADD COLUMN dial_code TEXT`,
   `ALTER TABLE users ADD COLUMN last_login INTEGER`,
@@ -648,6 +685,7 @@ const raw = {
   all: async (sql, p = []) => db.prepare(sql).all(...p),
   run: async (sql, p = []) => { db.prepare(sql).run(...p); },
 };
+
 
 module.exports = {
   name: 'sqlite',
