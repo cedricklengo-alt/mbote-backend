@@ -1,8 +1,13 @@
 # Backend MboteCall — image Node 20 (Render, Docker)
-FROM node:20-alpine
+# bookworm-slim (glibc) : better-sqlite3 fournit des binaires précompilés,
+# contrairement à alpine/musl qui exige python3 + toolchain.
+FROM node:20-bookworm-slim
 
-# ffmpeg pour les miniatures vidéo (video_thumb)
-RUN apk add --no-cache ffmpeg
+# ffmpeg (miniatures vidéo) + toolchain native (repli si better-sqlite3
+# n'a pas de binaire précompilé pour la version exacte de Node)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      ffmpeg python3 make g++ \
+    && rm -rf /var/lib/apt/lists/*
 
 ENV NODE_ENV=production
 WORKDIR /app
