@@ -1,0 +1,9 @@
+node_modules
+mbote.db
+mbote.db-shm
+mbote.db-wal
+uploads
+test
+.git
+.env
+*.log
