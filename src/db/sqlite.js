@@ -584,6 +584,10 @@ const MIGRATIONS = [
   `ALTER TABLE posts ADD COLUMN thumb_url TEXT`,
   // 🔗 v3.6 : nombre de partages (lien copié ou envoyé à une autre application)
   `ALTER TABLE posts ADD COLUMN shares INTEGER DEFAULT 0`,
+  // 📞 v3.7 : opt-in d'appel — le bouton d'appel n'apparaît que si l'auteur a coché « Autoriser les appels »
+  `ALTER TABLE posts ADD COLUMN allow_calls INTEGER DEFAULT 1`,
+  // ✏️ v3.8 : édition de publication (« Modifié » affiché côté client)
+  `ALTER TABLE posts ADD COLUMN edited_at INTEGER`,
   `CREATE TABLE IF NOT EXISTS post_views (
      post_id    TEXT NOT NULL,
      user_id    TEXT NOT NULL REFERENCES users(id),

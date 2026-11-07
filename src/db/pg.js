@@ -530,6 +530,10 @@ ALTER TABLE posts ADD COLUMN IF NOT EXISTS thumb_url TEXT;
 
 /* Nombre de partages : lien copié ou publication envoyée à une autre app. */
 ALTER TABLE posts ADD COLUMN IF NOT EXISTS shares INTEGER DEFAULT 0;
+-- 📞 v3.7 : opt-in d'appel (case « Autoriser les appels » à la publication)
+ALTER TABLE posts ADD COLUMN IF NOT EXISTS allow_calls INTEGER DEFAULT 1;
+-- ✏️ v3.8 : édition de publication (« Modifié » côté client)
+ALTER TABLE posts ADD COLUMN IF NOT EXISTS edited_at BIGINT;
 
 /* Une ligne par (publication, lecteur) : le compteur ne peut pas être gonflé
  * en rafraîchissant la page. */

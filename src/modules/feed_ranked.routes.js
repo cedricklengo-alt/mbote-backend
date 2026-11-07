@@ -137,6 +137,19 @@ r.post('/posts/:id/react', requireAuth, ah(async (req, res) => {
     await db.run(`DELETE FROM post_likes WHERE post_id = ? AND user_id = ?`, [req.params.id, req.user.id]).catch(() => {});
   }
   await R.recordEvent(db, req.user.id, 'like', { postId: req.params.id });
+  // 🔔 Push « réaction » avec post_id (deep-linking vers la publication).
+  try {
+    const push = require('../services/push');
+    const post = await db.get('SELECT user_id FROM posts WHERE id = ?', [req.params.id]);
+    const auteur = post ? await db.get('SELECT id, fcm_token FROM users WHERE id = ?', [post.user_id]) : null;
+    if (auteur && auteur.fcm_token && auteur.id !== req.user.id) {
+      push.sendInfoPush(auteur.fcm_token,
+        type === 'like' ? 'Nouveau j\u2019aime' : 'Nouvelle réaction',
+        `${req.user.name || 'Quelqu\u2019un'} a réagi à votre publication`,
+        { kind: type === 'like' ? 'post_like' : 'reaction', post_id: String(req.params.id), from_phone: req.user.phone, from_name: req.user.name || '' })
+        .catch(() => {});
+    }
+  } catch (_) {}
   const counts = await db.all(
     `SELECT type, COUNT(*) n FROM post_reactions WHERE post_id = ? GROUP BY type`, [req.params.id]);
   res.json({ ok: true, reactions: counts });
@@ -150,13 +163,30 @@ r.delete('/posts/:id/react', requireAuth, ah(async (req, res) => {
 
 r.post('/comments/:id/react', requireAuth, ah(async (req, res) => {
   const type = String(req.body?.type || 'like');
-  if (!R.REACTIONS.includes(type)) return res.status(400).json({ error: 'réaction invalide' });
+  // 👍/👎 de commentaire : like ou dislike (les autres réactions restent
+  // réservées aux publications).
+  if (!['like', 'dislike'].includes(type)) return res.status(400).json({ error: 'réaction invalide' });
+  const cmt = await db.get('SELECT id FROM post_comments WHERE id = ?', [req.params.id]);
+  if (!cmt) return res.status(404).json({ error: 'Commentaire introuvable' });
   await db.run(
     `INSERT INTO comment_reactions (id, comment_id, user_id, type, created_at)
      VALUES (?, ?, ?, ?, ?)
      ON CONFLICT(comment_id, user_id) DO UPDATE SET type=excluded.type, created_at=excluded.created_at`,
     [uid(), req.params.id, req.user.id, type, now()]);
-  res.json({ ok: true });
+  const counts = await db.all(
+    `SELECT type, COUNT(*) n FROM comment_reactions WHERE comment_id = ? GROUP BY type`, [req.params.id]);
+  const likes = Number(counts.find((c) => c.type === 'like')?.n || 0);
+  const dislikes = Number(counts.find((c) => c.type === 'dislike')?.n || 0);
+  res.json({ ok: true, likes, dislikes, mine: type });
+}));
+
+r.delete('/comments/:id/react', requireAuth, ah(async (req, res) => {
+  await db.run('DELETE FROM comment_reactions WHERE comment_id = ? AND user_id = ?', [req.params.id, req.user.id]);
+  const counts = await db.all(
+    `SELECT type, COUNT(*) n FROM comment_reactions WHERE comment_id = ? GROUP BY type`, [req.params.id]);
+  const likes = Number(counts.find((c) => c.type === 'like')?.n || 0);
+  const dislikes = Number(counts.find((c) => c.type === 'dislike')?.n || 0);
+  res.json({ ok: true, likes, dislikes, mine: null });
 }));
 
 // ── Hashtags tendance ──────────────────────────────────────────────────────

@@ -1,7 +1,18 @@
 const jwt = require('jsonwebtoken');
 const db = require('../db');
 
-const SECRET = process.env.JWT_SECRET || 'dev-secret';
+// 🔒 En production, AUCUN fallback : un secret faible ou connu = tous les
+// jetons sont forgables. En dev, si JWT_SECRET manque, on génère un secret
+// éphémère aléatoire (les sessions sont alors invalidées à chaque
+// redémarrage, ce qui est acceptable en local et visible dans les logs).
+if (!process.env.JWT_SECRET) {
+  if (process.env.NODE_ENV === 'production') {
+    throw new Error('JWT_SECRET manquant : le serveur refuse de démarrer en production. Définissez JWT_SECRET dans les variables d’environnement (Render → Environment). Voir .env.example.');
+  }
+  process.env.JWT_SECRET = require('crypto').randomBytes(32).toString('hex');
+  console.warn('⚠️  JWT_SECRET absent : secret éphémère généré pour cette session (dev uniquement).');
+}
+const SECRET = process.env.JWT_SECRET;
 // 🔄 ROTATION SANS DOULEUR (Phase A) : pendant la transition, l'ancienne
 // clé reste acceptée en lecture via JWT_SECRET_OLD. Les nouveaux jetons
 // sont TOUJOURS signés avec JWT_SECRET. Après 30 jours (durée de vie max

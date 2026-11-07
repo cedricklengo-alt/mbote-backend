@@ -205,7 +205,7 @@ async function getThreads(req, res) {
   `, [req.user.id, req.user.id, req.user.id]);
   const threads = [];
   for (const { peer_id: peerId } of peers) {
-    const peer = await db.get('SELECT id,phone,name,presence_visible,last_seen_at FROM users WHERE id = ?', [peerId]);
+    const peer = await db.get('SELECT id,phone,name,avatar,presence_visible,last_seen_at FROM users WHERE id = ?', [peerId]);
     if (!peer) continue;
     const last = await db.get(`
       SELECT m.* FROM messages m
@@ -218,6 +218,7 @@ async function getThreads(req, res) {
       AND NOT EXISTS (SELECT 1 FROM message_hidden h WHERE h.message_id=m.id AND h.user_id=?)`, [peerId, req.user.id, req.user.id]);
     threads.push({
       peer_id: peer.id, peer_phone: peer.phone, peer_name: peer.name || peer.phone,
+      peer_avatar: peer.avatar || null,
       online: rtcWs.isOnline(peer.phone),
       last_seen_at: peer.presence_visible ? peer.last_seen_at : null,
       last_at: last.created_at, last_type: last.deleted_at ? 'deleted' : last.kind,
@@ -369,6 +370,33 @@ router.post('/delete', requireAuth, ah(async (req, res) => {
     }
   }
   res.json({ results });
+}));
+
+// ── Suppression groupée : POST /messages/bulk-delete { ids, scope: 'me'|'all' } ──
+router.post('/bulk-delete', requireAuth, ah(async (req, res) => {
+  const ids = Array.isArray(req.body?.ids) ? req.body.ids.map(String).filter(Boolean).slice(0, 200) : [];
+  if (!ids.length) return res.status(400).json({ error: 'ids requis' });
+  const scope = req.body?.scope === 'all' ? 'all' : 'me';
+  const q = ids.map(() => '?').join(',');
+  let supprimes = 0;
+  for (const id of ids) {
+    const row = await db.get('SELECT * FROM messages WHERE id = ?', [id]);
+    if (!row) continue;
+    const moi = row.sender_id === req.user.id || row.recipient_id === req.user.id;
+    if (!moi) continue;
+    if (scope === 'all' && row.sender_id !== req.user.id) continue; // « pour tous » = auteur seul
+    if (scope === 'all') {
+      await db.run('DELETE FROM messages WHERE id = ?', [id]);
+      const peerId = row.sender_id === req.user.id ? row.recipient_id : row.sender_id;
+      const peer = await db.get('SELECT phone FROM users WHERE id = ?', [peerId]);
+      if (peer) rtcWs.sendTo(peer.phone, { type: 'msg', kind: 'deleted', msg_id: id, from_phone: req.user.phone });
+    } else {
+      await db.run('UPDATE messages SET deleted_at = COALESCE(deleted_at, ?), body = \'\', translation = \'\', transcript = \'\' WHERE id = ?', [now(), id]);
+      await db.run('INSERT OR IGNORE INTO message_hidden (message_id, user_id) VALUES (?, ?)', [id, req.user.id]);
+    }
+    supprimes++;
+  }
+  res.json({ ok: true, supprimes });
 }));
 
 router.delete('/:id', requireAuth, ah(async (req, res) => {

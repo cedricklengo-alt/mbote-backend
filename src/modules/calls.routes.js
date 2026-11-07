@@ -13,6 +13,16 @@ const rtcWs = require('./rtc.ws');
 
 const r = express.Router();
 
+// ── Suppression groupée de l'historique : POST /calls/bulk-delete { ids } ──
+r.post('/bulk-delete', requireAuth, ah(async (req, res) => {
+  const ids = Array.isArray(req.body?.ids) ? req.body.ids.map(String).filter(Boolean).slice(0, 500) : [];
+  if (!ids.length) return res.status(400).json({ error: 'ids requis' });
+  const q = ids.map(() => '?').join(',');
+  const r2 = await db.run(`DELETE FROM calls WHERE user_id = ? AND id IN (${q})`, [req.user.id, ...ids]);
+  res.json({ ok: true, supprimes: ids.length });
+}));
+
+
 /* ---------- Helpers ---------- */
 // Synchronise l'état provider → BDD (transition sonnerie → décroché)
 async function syncState(call) {

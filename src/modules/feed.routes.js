@@ -100,7 +100,8 @@ function selectPosts(userId) {
              u.name    AS author_name,
              u.country AS author_country,
              u.avatar  AS author_avatar,
-             CASE WHEN p.user_id = ? OR p.user_id IN (${CONTACT_AUTHORS})
+             CASE WHEN (p.user_id = ? OR p.user_id IN (${CONTACT_AUTHORS}))
+                       AND COALESCE(p.allow_calls, 1) = 1
                   THEN u.phone ELSE NULL END AS author_phone,
              CASE WHEN pl.user_id IS NOT NULL THEN 1 ELSE 0 END AS liked
         FROM posts p
@@ -964,8 +965,8 @@ r.post('/posts', requireAuth, ah(async (req, res) => {
     INSERT INTO posts
       (id, user_id, type, origine, duree, visibilite,
        media_url, texte, event_title, event_date, event_lieu, event_tags,
-       clip_sec, ville, thumb_url, likes, comments, vues, created_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, 0, ?)
+       clip_sec, ville, thumb_url, allow_calls, likes, comments, vues, created_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, 0, ?)
   `, [
     id, req.user.id, type, origine, dur, vis,
     media_url      || null,
@@ -978,6 +979,7 @@ r.post('/posts', requireAuth, ah(async (req, res) => {
     // Ville facultative : sert de pastille sur la carte du fil.
     typeof ville === 'string' && ville.trim() ? ville.trim().slice(0, 80) : null,
     miniature,
+    req.body.allow_calls !== false ? 1 : 0,
     ts,
   ]);
 
@@ -1113,7 +1115,7 @@ r.get('/posts/:id/public', optionalAuth, ah(async (req, res) => {
 
   const sel = `SELECT p.*, u.name AS author_name, u.country AS author_country,
                       u.avatar AS author_avatar,
-                      CASE WHEN p.user_id = ? THEN u.phone ELSE NULL END AS author_phone
+                      CASE WHEN p.user_id = ? AND COALESCE(p.allow_calls, 1) = 1 THEN u.phone ELSE NULL END AS author_phone
                  FROM posts p JOIN users u ON u.id = p.user_id
                 WHERE p.id = ?`;
 
@@ -1298,12 +1300,15 @@ r.get('/posts/:id/comments', requireAuth, ah(async (req, res) => {
   const comments = await db.all(`
     SELECT c.*, u.name AS author_name, u.handle AS author_handle,
            u.avatar AS author_avatar,
-           CASE WHEN c.user_id = ? THEN 1 ELSE 0 END AS a_moi
+           CASE WHEN c.user_id = ? THEN 1 ELSE 0 END AS a_moi,
+           (SELECT COUNT(*) FROM comment_reactions cr WHERE cr.comment_id = c.id AND cr.type = 'like') AS likes,
+           (SELECT COUNT(*) FROM comment_reactions cr WHERE cr.comment_id = c.id AND cr.type = 'dislike') AS dislikes,
+           (SELECT cr.type FROM comment_reactions cr WHERE cr.comment_id = c.id AND cr.user_id = ?) AS ma_reaction
     FROM post_comments c
     JOIN users u ON u.id = c.user_id
     WHERE c.post_id = ?
     ORDER BY c.created_at ASC
-  `, [req.user.id, req.params.id]);
+  `, [req.user.id, req.user.id, req.params.id]);
 
   res.json({
     comments: comments.map((c) => ({ ...c, reponses: [] })),
@@ -1377,6 +1382,19 @@ r.post('/posts/:id/comments', requireAuth, ah(async (req, res) => {
     WHERE c.id = ?
   `, [cmId]);
 
+  // 🔔 Push « Nouveau commentaire » avec post_id + comment_id (deep-linking).
+  try {
+    const push = require('../services/push');
+    const auteur = await db.get('SELECT id, fcm_token, name FROM users WHERE id = ?', [post.user_id]);
+    if (auteur && auteur.fcm_token && auteur.id !== req.user.id) {
+      push.sendInfoPush(auteur.fcm_token,
+        'Nouveau commentaire',
+        `${req.user.name || 'Quelqu\u2019un'} a commenté votre publication`,
+        { kind: 'comment', post_id: String(post.id), comment_id: String(cmId), from_phone: req.user.phone, from_name: req.user.name || '' })
+        .catch(() => {});
+    }
+  } catch (_) {}
+
   res.status(201).json({
     comment: { ...comment, mentions: mentionne.mentions },
     social: { mentions: mentionne.mentions.length, notifies: mentionne.notifies },
@@ -1386,6 +1404,43 @@ r.post('/posts/:id/comments', requireAuth, ah(async (req, res) => {
 // ─── DELETE /api/feed/posts/:id ───────────────────────────────────────────────
 // Seul l'auteur peut supprimer sa publication. Les j'aime, commentaires, vues
 // et mots-clés associés partent avec (sinon les tables grossissent sans fin).
+// ─── PATCH /api/feed/posts/:id — ÉDITION d'une publication (auteur seul) ───
+r.patch('/posts/:id', requireAuth, ah(async (req, res) => {
+  const p = await db.get('SELECT * FROM posts WHERE id = ?', [req.params.id]);
+  if (!p) return res.status(404).json({ error: 'Publication introuvable' });
+  if (p.user_id !== req.user.id) return res.status(403).json({ error: 'Seul l\u2019auteur peut modifier' });
+
+  const b = req.body || {};
+  const sets = [], params = [];
+  if (typeof b.texte === 'string') { sets.push('texte = ?'); params.push(b.texte.trim().slice(0, 4000) || null); }
+  if (typeof b.media_url === 'string') { sets.push('media_url = ?'); params.push(b.media_url.trim().slice(0, 500) || null); }
+  if (typeof b.thumb_url === 'string') { sets.push('thumb_url = ?'); params.push(b.thumb_url.trim().slice(0, 500) || null); }
+  if (b.visibilite !== undefined) {
+    const vis = canoniserVisibilite(b.visibilite);
+    if (!vis) return res.status(400).json({ error: 'Visibilité invalide (public|communaute|contacts)' });
+    sets.push('visibilite = ?'); params.push(vis);
+  }
+  if (!sets.length) return res.status(400).json({ error: 'Nothing to update' });
+  sets.push('edited_at = ?'); params.push(now());
+  params.push(p.id);
+  await db.run(`UPDATE posts SET ${sets.join(', ')} WHERE id = ?`, params);
+
+  // Hashtags : on resynchronise les tags du nouveau texte.
+  await db.run('DELETE FROM post_tags WHERE post_id = ?', [p.id]);
+  const nouveauTexte = typeof b.texte === 'string' ? b.texte : (p.texte || '');
+  const tags = [...nouveauTexte.toLowerCase().matchAll(/#([\p{L}\p{N}_]{1,50})/gu)].map((m) => m[1]);
+  for (const tag of [...new Set(tags)]) {
+    await db.run('INSERT INTO post_tags (id, post_id, tag, created_at) VALUES (?, ?, ?, ?)',
+      [uid('pt'), p.id, tag, now()]);
+  }
+
+  const maj = await db.get(`SELECT p.*, u.name AS author_name, u.country AS author_country,
+      u.avatar AS author_avatar,
+      CASE WHEN p.user_id = ? OR p.user_id IN (SELECT uc.id FROM contacts c JOIN users uc ON uc.phone = c.phone WHERE c.user_id = ?) THEN u.phone ELSE NULL END AS author_phone
+    FROM posts p JOIN users u ON u.id = p.user_id WHERE p.id = ?`, [req.user.id, req.user.id, p.id]);
+  res.json({ ok: true, post: maj });
+}));
+
 r.delete('/posts/:id', requireAuth, ah(async (req, res) => {
   const post = await db.get('SELECT id, user_id, media_url FROM posts WHERE id = ?', [req.params.id]);
   if (!post) return res.status(404).json({ error: 'Publication introuvable' });
