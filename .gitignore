@@ -1,0 +1,34 @@
+# ── Dépendances (jamais dans le dépôt : `npm install` les recrée) ──────────
+node_modules/
+npm-debug.log*
+yarn-error.log*
+
+# ── Secrets et configuration locale ───────────────────────────────────────
+.env
+.env.local
+*.pem
+
+# ── Base de données locale de développement ────────────────────────────────
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+
+# ── Contenus envoyés par les utilisateurs (uploads, stockage temporaire) ───
+uploads/
+storage/
+
+# ── Divers ─────────────────────────────────────────────────────────────────
+*.log
+.DS_Store
+Thumbs.db
+coverage/
+download
+download (1)
+
+# Base de démonstration locale : jamais dans l’historique (binaire, change à
+# chaque exécution de test). Le fichier reste sur le disque.
+*.db
+*.db-shm
+*.db-wal

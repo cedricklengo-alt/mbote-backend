@@ -1,0 +1,45 @@
+{
+  "name": "mbote-backend",
+  "version": "1.0.0",
+  "description": "MBOTE! — Backend monolithe modulaire (auth, wallet, rating, calls, CDR, admin)",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/seed.js && node src/server.js",
+    "seed": "node src/seed.js",
+    "pretest": "node src/seed.js",
+    "test": "node test/db_tx.test.js && node test/api_smoke.test.js && node test/group_signaling.test.js && node test/feed.test.js && node test/feed_visibility.test.js && node test/video_thumb.test.js && node test/partage.test.js && node test/social.test.js && node test/notifs.test.js && node test/calls.test.js && node test/messages.test.js && node test/billing_referral.test.js && node test/wallet.test.js && node test/shop.test.js && node test/twilio_sms.test.js && node test/schema_repair.test.js && node test/lokota_emojis.test.js && node test/catalogue_boot.test.js && node test/rtc_ice.test.js && node test/calls_start_rtc.test.js && node test/presence_reminder.test.js && node test/auth_session.test.js && node src/seed.js && node test/push_cleanup.test.js",
+    "test:api": "node src/seed.js && node test/api_smoke.test.js",
+    "test:groupe": "node src/seed.js && node test/group_signaling.test.js",
+    "test:wallet": "node src/seed.js && node test/wallet.test.js",
+    "test:shop": "node src/seed.js && node test/shop.test.js",
+    "test:db": "node src/seed.js && node test/db_tx.test.js",
+    "test:billing": "node src/seed.js && node test/billing_referral.test.js",
+    "test:twilio": "node src/seed.js && node test/twilio_sms.test.js",
+    "test:schema": "node test/schema_repair.test.js",
+    "test:lokota": "node test/lokota_emojis.test.js",
+    "test:catalogue": "node src/seed.js && node test/catalogue_boot.test.js",
+    "test:ice": "node test/rtc_ice.test.js",
+    "test:calls-start": "node src/seed.js && node test/calls_start_rtc.test.js",
+    "test:push-cleanup": "node src/seed.js && node test/push_cleanup.test.js",
+    "test:feed-visibility": "node src/seed.js && node test/feed_visibility.test.js",
+    "test:video-thumb": "node src/seed.js && node test/video_thumb.test.js",
+    "test:partage": "node src/seed.js && node test/partage.test.js",
+    "test:social": "node src/seed.js && node test/social.test.js",
+    "test:notifs": "node src/seed.js && node test/notifs.test.js"
+  },
+  "dependencies": {
+    "better-sqlite3": "^12.11.1",
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2",
+    "firebase-admin": "^12.7.0",
+    "jsonwebtoken": "^9.0.2",
+    "multer": "^1.4.5-lts.1",
+    "pg": "^8.13.1",
+    "twilio": "^5.3.7",
+    "uuid": "^9.0.1",
+    "ws": "^8.22.1"
+  },
+  "optionalDependencies": {
+    "ffmpeg-static": "^5.2.0"
+  }
+}
